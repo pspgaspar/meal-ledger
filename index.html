@@ -1770,6 +1770,7 @@ function renderSetup(root){
     ? fmt1(Math.abs(fromKg(lw0.kg) - fromKg(pr.goalWeightKg))) + " " + unitLabel() + " to go"
     : "Leave blank to just hold steady"));
   var iGW = el("input"); iGW.type = "number"; iGW.step = "0.1"; iGW.min = "0"; iGW.id = "goalWeight";
+  iGW.setAttribute("inputmode","decimal");
   iGW.placeholder = "—";
   iGW.value = pr.goalWeightKg ? fmt1(fromKg(pr.goalWeightKg)) : "";
   iGW.addEventListener("change", function(){
@@ -2027,6 +2028,23 @@ function howText(e){
          Math.round(e.assumed) + " cal a day of exercise";
 }
 
+/* Rescale the shares to total exactly 100, keeping their proportions. The
+   rounding residual lands on the largest share, where it is least visible. */
+function normaliseShares(){
+  var slots = state.settings.slots, tot = pctTotal();
+  if (!tot) return;
+  var vals = slots.map(function(sl){
+    return Math.round((Number(sl.pct) || 0) * 100 / tot * 10) / 10;
+  });
+  var sum = Math.round(vals.reduce(function(a,b){ return a + b; }, 0) * 10) / 10;
+  var bi = 0;
+  for (var i = 1; i < vals.length; i++) if (vals[i] > vals[bi]) bi = i;
+  vals[bi] = Math.round((vals[bi] + (100 - sum)) * 10) / 10;
+  slots.forEach(function(sl, i){ sl.pct = vals[i]; });
+  persistSettings(); render();
+  toast("Shares now total 100%");
+}
+
 /* Shares, not calorie figures. Change the daily target and every meal follows. */
 function renderSplit(){
   var dt = Number(state.settings.dailyTarget) || 0;
@@ -2049,8 +2067,8 @@ function renderSplit(){
     var box = el("div","pctbox");
     var inp = el("input");
     inp.type = "number"; inp.id = "pct-" + sl.id;
-    inp.min = "0"; inp.max = "100"; inp.step = "1";
-    inp.setAttribute("inputmode","numeric");
+    inp.min = "0"; inp.max = "100"; inp.step = "0.1";
+    inp.setAttribute("inputmode","decimal");
     inp.value = sl.pct;
     inp.setAttribute("aria-label","Share of the day for " + sl.label);
     inp.addEventListener("change", function(){
@@ -2082,6 +2100,13 @@ function renderSplit(){
     sec.appendChild(el("div","status warn",
       "The shares add up to " + tot + "%, so your meals come to " + sumCal +
       " rather than " + dt + "."));
+    var brN = el("div","btnrow");
+    var normB = el("button","btn primary");
+    normB.type = "button";
+    normB.textContent = "Make it 100%";
+    normB.addEventListener("click", normaliseShares);
+    brN.appendChild(normB);
+    sec.appendChild(brN);
   }
 
   var br = el("div","btnrow");
