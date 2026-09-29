@@ -211,6 +211,8 @@ svg.chart .bar-empty{fill:var(--empty)}
 svg.chart .bar-hit{fill:var(--r-perfect)}
 .trend-note{margin-top:14px;font-size:13px;color:var(--ink-soft);line-height:1.55}
 .trend-note b{color:var(--ink)}
+.trend-note .partial{display:block;margin-top:7px;padding-top:7px;
+  border-top:1px solid var(--rule-soft);color:var(--ink-faint);font-size:12px}
 
 /* ---------- setup ---------- */
 .sec{margin-bottom:24px}
@@ -933,19 +935,30 @@ function renderTrend(root){
   card2.appendChild(hitChart(weeks));
   root.appendChild(card2);
 
+  /* The current week is still filling up. Comparing it to a finished week
+     would report a slump every Monday, so trends are read off whole weeks
+     and this week is reported separately as a partial. */
+  var current = weeks[weeks.length-1];
+  var done = active.filter(function(w){ return w.start !== thisStart; });
+
   var note = el("div","trend-note");
-  if (active.length < 2){
-    note.appendChild(document.createTextNode("Log a couple of weeks and this will start telling you whether you’re improving."));
-  } else {
-    var last = active[active.length-1], prevW = active[active.length-2];
-    var diff = last.net - prevW.net;
-    var recent = active.slice(-4);
-    var avg = recent.reduce(function(a,w){ return a + w.net; }, 0) / recent.length;
-    var b1 = el("b","", diff > 0 ? "Up " + signed(diff) : diff < 0 ? "Down " + Math.abs(diff) : "Flat");
-    note.appendChild(b1);
+  if (done.length < 2){
     note.appendChild(document.createTextNode(
-      " on the week before. Your last " + recent.length + " weeks average " +
+      "Once you have two full weeks behind you, this will tell you whether you are improving."));
+  } else {
+    var last = done[done.length-1], prevW = done[done.length-2];
+    var diff = last.net - prevW.net;
+    var recent = done.slice(-4);
+    var avg = recent.reduce(function(a,w){ return a + w.net; }, 0) / recent.length;
+    note.appendChild(el("b","", diff > 0 ? "Up " + signed(diff) : diff < 0 ? "Down " + Math.abs(diff) : "Level"));
+    note.appendChild(document.createTextNode(
+      " on the week before that. Your last " + recent.length + " full weeks average " +
       (avg>0?"+":avg<0?"−":"") + Math.abs(avg).toFixed(1) + " net per week."));
+  }
+  if (current && current.logged > 0){
+    note.appendChild(el("span","partial",
+      "This week is " + current.logged + (current.logged === 1 ? " day" : " days") +
+      " in, at " + signed(current.net) + " so far."));
   }
   root.appendChild(note);
 }
@@ -1009,9 +1022,11 @@ function hitChart(weeks){
   [0, 3.5, 7].forEach(function(v){
     var y = yBase - (v/7)*innerH;
     svg.appendChild(svgEl("line",{ x1:padL, x2:W-padR, y1:y, y2:y, "class":"ax" }));
-    var t = svgEl("text",{ x:padL-6, y:y+3.5, "text-anchor":"end", "class":"ax-label" });
-    t.textContent = String(v);
-    svg.appendChild(t);
+    if (v === Math.round(v)){            /* no half-days on a day count */
+      var t = svgEl("text",{ x:padL-6, y:y+3.5, "text-anchor":"end", "class":"ax-label" });
+      t.textContent = String(v);
+      svg.appendChild(t);
+    }
   });
 
   weeks.forEach(function(w,i){
