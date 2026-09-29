@@ -123,6 +123,8 @@ main{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch}
   border:1px dashed var(--rule);border-radius:10px;padding:9px 12px;margin-bottom:14px;
 }
 .hintbar button{color:var(--accent);font-weight:600;text-decoration:underline;padding:0}
+.hintbar.warn{border-style:solid;border-color:var(--r-terrible);color:var(--r-terrible)}
+.hintbar.warn button{color:var(--r-terrible)}
 
 .slot{border-top:1px solid var(--rule-soft);padding:12px 2px 14px}
 .slot:first-of-type{border-top:none}
@@ -514,8 +516,11 @@ function loadSync(){
 }
 function saveMeta(){ lsSet(META_KEY, JSON.stringify({ lastAt: sync.lastAt })); }
 function setSync(status, message){
+  var was = sync.status;
   sync.status = status; sync.message = message || "";
-  if (ui.view === "setup") renderSafe();
+  /* A silent backup failure is how a year of tracking disappears, so surface
+     it on the logging screen too, not only in Setup. */
+  if (ui.view === "setup" || (ui.view === "today" && was !== status)) renderSafe();
 }
 
 function gh(path, opts){
@@ -747,6 +752,24 @@ function renderToday(root){
   head.appendChild(left);
   head.appendChild(el("div","verdict", verdictOf(net, has)));
   root.appendChild(head);
+
+  if (sync.status === "error"){
+    var wb = el("div","hintbar warn");
+    wb.appendChild(document.createTextNode("Backup is not going through. "));
+    var wbb = el("button", null, "Check Setup");
+    wbb.addEventListener("click", function(){ ui.view = "setup"; saveUi(); render(); });
+    wb.appendChild(wbb);
+    wb.appendChild(document.createTextNode(". Today is still saved on this phone."));
+    root.appendChild(wb);
+  } else if (!sync.token && Object.keys(state.days).filter(function(x){ return dayHasData(state.days[x]); }).length >= 3){
+    var nb = el("div","hintbar warn");
+    nb.appendChild(document.createTextNode("No backup yet, so this only exists on this phone. "));
+    var nbb = el("button", null, "Connect one");
+    nbb.addEventListener("click", function(){ ui.view = "setup"; saveUi(); render(); });
+    nb.appendChild(nbb);
+    nb.appendChild(document.createTextNode("."));
+    root.appendChild(nb);
+  }
 
   if (!targetsConfigured()){
     var hb = el("div","hintbar");
