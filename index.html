@@ -1727,8 +1727,9 @@ function renderSetup(root){
     function(v){ state.settings.profile.activityMode = v; persistSettings(); render(); }));
 
   if (mode === "typical"){
-    cB.appendChild(selectRow("Typical week", "One multiplier for every day", "actSel",
-      ACTIVITY.map(function(a){ return { v:String(a.v), t:a.label + "  \u00b7  " + a.v }; }),
+    cB.appendChild(selectRow("Typical week",
+      "Multiplies your resting burn. Not a calorie figure.", "actSel",
+      ACTIVITY.map(function(a){ return { v:String(a.v), t:a.label + "  \u00d7" + a.v }; }),
       String(pr.activity),
       function(v){ state.settings.profile.activity = parseFloat(v); persistSettings(); render(); }));
   } else if (mode === "estimate"){
@@ -1784,7 +1785,8 @@ function renderSetup(root){
       "at " + (state.settings.units === "kg" ? Math.round(e.cm) + " cm"
              : Math.floor(e.cm / 2.54 / 12) + " ft " + Math.round(e.cm / 2.54 - Math.floor(e.cm / 2.54 / 12) * 12) + " in"),
       null));
-    grid.appendChild(cellBox("Maintain", String(Math.round(e.tdee)), "cal a day", null));
+    grid.appendChild(cellBox("Maintain", String(Math.round(e.tdee)),
+      "cal a day to hold " + fmt1(fromKg(e.kg)) + " " + unitLabel(), null));
     sB.appendChild(grid);
 
     var tp = el("div","targetpanel");
@@ -1792,13 +1794,14 @@ function renderSetup(root){
     tp.appendChild(el("div","v", Math.round(e.target) + " cal"));
     var how;
     if (e.basis === "logged"){
-      how = "Resting burn " + Math.round(e.bmr) + " × 1.2 for ordinary living, plus the " +
-            Math.round(e.win.mean) + " cal a day you actually logged";
+      how = "Resting burn " + Math.round(e.bmr) + " plus 20% for ordinary living, plus the " +
+            Math.round(e.win.mean) + " cal a day you logged, giving " + Math.round(e.tdee);
     } else if (e.basis === "typical"){
-      how = "Resting burn " + Math.round(e.bmr) + " × " + e.act + " for a typical week";
+      how = "Resting burn " + Math.round(e.bmr) + " multiplied by " + e.act +
+            " for a typical week, giving " + Math.round(e.tdee);
     } else {
-      how = "Resting burn " + Math.round(e.bmr) + " × 1.2 for ordinary living, plus " +
-            Math.round(e.assumed) + " cal a day of exercise";
+      how = "Resting burn " + Math.round(e.bmr) + " plus 20% for ordinary living, plus " +
+            Math.round(e.assumed) + " cal a day of exercise, giving " + Math.round(e.tdee);
     }
     tp.appendChild(el("div","d", e.goal.label.toLowerCase() + ". " + how +
       (e.goal.delta ? ", " + (e.goal.delta < 0 ? "minus " : "plus ") + Math.abs(e.goal.delta) : "") + "."));
