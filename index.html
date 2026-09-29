@@ -467,7 +467,8 @@ var TOKEN_KEY = "mealledger.token.v1";
 var GIST_KEY  = "mealledger.gistid.v1";
 var META_KEY  = "mealledger.meta.v1";
 
-var sync = { token:null, gistId:null, status:"off", message:"", lastAt:null };
+var sync = { token:null, gistId:null, status:"off", message:"", lastAt:null, authFailed:false };
+var STALE_DAYS = 3;
 var pushTimer = null, pushing = false, pushAgain = false;
 
 function saveCache(){
@@ -511,10 +512,23 @@ function mergeSettings(cfg){
 function loadSync(){
   sync.token  = lsGet(TOKEN_KEY) || null;
   sync.gistId = lsGet(GIST_KEY)  || null;
-  try { var m = JSON.parse(lsGet(META_KEY) || "{}"); sync.lastAt = m.lastAt || null; } catch(e){}
+  try {
+    var m = JSON.parse(lsGet(META_KEY) || "{}");
+    sync.lastAt = m.lastAt || null;
+    sync.authFailed = !!m.authFailed;   /* survives a reload, unlike status */
+  } catch(e){}
   sync.status = sync.token ? "idle" : "off";
 }
-function saveMeta(){ lsSet(META_KEY, JSON.stringify({ lastAt: sync.lastAt })); }
+function saveMeta(){
+  lsSet(META_KEY, JSON.stringify({ lastAt: sync.lastAt, authFailed: sync.authFailed }));
+}
+/* Whole days since the last backup that actually succeeded. null = no token,
+   or none has ever succeeded. This is what catches a token dying quietly:
+   it does not care WHY the backup stopped, only that it did. */
+function staleDays(){
+  if (!sync.token || !sync.lastAt) return null;
+  return Math.floor((Date.now() - new Date(sync.lastAt).getTime()) / 86400000);
+}
 function setSync(status, message){
   var was = sync.status;
   sync.status = status; sync.message = message || "";
@@ -602,9 +616,18 @@ function findOrCreateGist(){
 
 function handleSyncErr(e){
   var msg = (e && e.message) ? e.message : "No connection.";
-  if (e && e.kind === "auth") setSync("error", msg + " Reconnect below.");
-  else setSync("error", msg + " Your ratings are safe on this phone. It will retry.");
+  if (e && e.kind === "auth"){
+    sync.authFailed = true; saveMeta();
+    setSync("error", msg + " The token has expired or been revoked. Reconnect below.");
+  } else {
+    setSync("error", msg + " Your ratings are safe on this phone. It will retry.");
+  }
   return false;
+}
+function syncSucceeded(){
+  sync.lastAt = new Date().toISOString();
+  sync.authFailed = false;
+  saveMeta();
 }
 
 function pullNow(){
@@ -620,7 +643,7 @@ function pullNow(){
         catch(e){ throw { kind:"parse", message:"That backup could not be read." }; }
         out = mergeRemote(parsed);
       }
-      sync.lastAt = new Date().toISOString(); saveMeta();
+      syncSucceeded();
       setSync("ok", "");
       return out;
     })
@@ -636,7 +659,7 @@ function pushNow(){
     .then(function(id){ return gh("/gists/" + id, { method:"PATCH", body:{ files: gistFiles() } }); })
     .then(function(){
       pushing = false;
-      sync.lastAt = new Date().toISOString(); saveMeta();
+      syncSucceeded();
       setSync("ok", "");
       if (pushAgain){ pushAgain = false; pushSoon(); }
       return true;
@@ -657,7 +680,7 @@ function connectToken(tok){
   return pullNow().then(function(){ return pushNow(); }).then(function(){ render(); });
 }
 function disconnectSync(){
-  sync.token = null; sync.gistId = null; sync.lastAt = null;
+  sync.token = null; sync.gistId = null; sync.lastAt = null; sync.authFailed = false;
   lsSet(TOKEN_KEY, ""); lsSet(GIST_KEY, ""); lsSet(META_KEY, "");
   setSync("off", "");
   render();
@@ -753,14 +776,15 @@ function renderToday(root){
   head.appendChild(el("div","verdict", verdictOf(net, has)));
   root.appendChild(head);
 
-  if (sync.status === "error"){
-    var wb = el("div","hintbar warn");
-    wb.appendChild(document.createTextNode("Backup is not going through. "));
-    var wbb = el("button", null, "Check Setup");
-    wbb.addEventListener("click", function(){ ui.view = "setup"; saveUi(); render(); });
-    wb.appendChild(wbb);
-    wb.appendChild(document.createTextNode(". Today is still saved on this phone."));
-    root.appendChild(wb);
+  /* A passing dead zone is not a problem and must not cry wolf. A refused
+     token, or a backup that simply stopped succeeding, is. */
+  var stale = staleDays();
+  if (sync.token && sync.authFailed){
+    root.appendChild(warnBar("Backup stopped. GitHub refused the token, so it has expired or been revoked. ",
+      "Reconnect", ". Nothing logged has been lost."));
+  } else if (sync.token && stale !== null && stale >= STALE_DAYS){
+    root.appendChild(warnBar("Last successful backup was " + stale + " days ago. ",
+      "Check Setup", ". Today is still saved on this phone."));
   } else if (!sync.token && Object.keys(state.days).filter(function(x){ return dayHasData(state.days[x]); }).length >= 3){
     var nb = el("div","hintbar warn");
     nb.appendChild(document.createTextNode("No backup yet, so this only exists on this phone. "));
@@ -847,6 +871,15 @@ function renderToday(root){
     nw.appendChild(ta);
   }
   root.appendChild(nw);
+}
+function warnBar(lead, linkText, tail){
+  var b = el("div","hintbar warn");
+  b.appendChild(document.createTextNode(lead));
+  var a = el("button", null, linkText);
+  a.addEventListener("click", function(){ ui.view = "setup"; saveUi(); render(); });
+  b.appendChild(a);
+  b.appendChild(document.createTextNode(tail || ""));
+  return b;
 }
 function targetsConfigured(){
   for (var i=0;i<state.settings.slots.length;i++)
@@ -1212,8 +1245,10 @@ function renderSetup(root){
     var r1 = el("div","frow");
     var st1 = el("label");
     st1.appendChild(document.createTextNode(
+      sync.authFailed ? "Backup stopped" :
       sync.status === "error" ? "Backup failed" :
-      sync.status === "syncing" ? "Backing up..." : "Backed up"));
+      sync.status === "syncing" ? "Backing up..." :
+      (staleDays() >= STALE_DAYS ? "Backup is behind" : "Backed up")));
     st1.appendChild(el("small","", sync.status === "error"
       ? sync.message
       : "Last copy " + agoText(sync.lastAt) + (sync.gistId ? " · gist " + sync.gistId.slice(0,7) : "")));
