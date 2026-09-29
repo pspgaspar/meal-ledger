@@ -348,7 +348,7 @@ var GOALS = [
 var DEFAULT_SETTINGS = {
   dailyTarget: null,
   units: "lb",
-  profile: { dob:null, heightCm:null, sex:null, activity:1.725, goal:"maintain" },
+  profile: { dob:null, heightCm:null, sex:null, activity:1.725, goal:"maintain", activityMode:"typical" },
   extraPenalty: 1,
   extraCap: 3,
   weekStartsOn: 1,
@@ -375,7 +375,7 @@ var DOW = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
 var MON = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 
 /* ============================ state ============================ */
-var state = { settings: clone(DEFAULT_SETTINGS), settingsUpdatedAt: null, days: {}, weights: {} };
+var state = { settings: clone(DEFAULT_SETTINGS), settingsUpdatedAt: null, days: {}, weights: {}, exercise: {} };
 var ui    = { view:"today", date:todayKey(), noteOpen:false };
 var pendingRender = false;
 
@@ -515,6 +515,32 @@ function latestWeight(){
   return ks.length ? { key: ks[ks.length-1], kg: getWeight(ks[ks.length-1]) } : null;
 }
 
+function getEx(k){
+  var e = state.exercise[k];
+  return (e && typeof e.kcal === "number") ? e.kcal : null;
+}
+function setEx(k, kcal){
+  if (kcal === null) delete state.exercise[k];
+  else state.exercise[k] = { kcal: kcal, updatedAt: new Date().toISOString() };
+  saveCache();
+  pushSoon();
+}
+function exKeys(){
+  return Object.keys(state.exercise).filter(function(k){ return getEx(k) !== null; }).sort();
+}
+/* Mean active calories per CALENDAR day over the window. A day with nothing
+   logged counts as zero, not as missing: averaging only over logged days would
+   quietly assume every unlogged day was a training day. */
+function activeWindow(n){
+  var end = parseKey(todayKey()), sum = 0, logged = 0;
+  for (var i = 0; i < n; i++){
+    var d = new Date(end); d.setDate(d.getDate() - i);
+    var v = getEx(keyOf(d));
+    if (v !== null){ sum += v; logged++; }
+  }
+  return { mean: sum / n, total: sum, logged: logged, days: n };
+}
+
 /* Age in whole years, recomputed from the date of birth so it never goes stale. */
 function ageYears(dob){
   if (!dob) return null;
@@ -536,18 +562,6 @@ function bmiOf(kg, cm){
   var m = cm / 100;
   return kg / (m * m);
 }
-function bmiBand(v){
-  if (v === null) return "";
-  if (v < 18.5) return "under";
-  if (v < 25) return "healthy";
-  if (v < 30) return "over";
-  return "obese";
-}
-function bmiBandLabel(v){
-  var b = bmiBand(v);
-  return b === "under" ? "Underweight" : b === "healthy" ? "Healthy range"
-       : b === "over" ? "Overweight" : b === "obese" ? "Obese" : "";
-}
 function goalById(id){
   for (var i=0;i<GOALS.length;i++) if (GOALS[i].id === id) return GOALS[i];
   return GOALS[0];
@@ -560,12 +574,18 @@ function energy(){
   var age = ageYears(pr.dob);
   var b = bmrOf(kg, pr.heightCm, age, pr.sex);
   var act = Number(pr.activity) || 1.2;
-  var tdee = b === null ? null : b * act;
+  var win = activeWindow(14);
+  /* "logged" needs a few real days behind it, or one gym session would set
+     the target for a fortnight. Below that it quietly falls back. */
+  var useLogged = (pr.activityMode === "logged" && win.logged >= 3);
+  var basis = useLogged ? "logged" : (pr.activityMode === "logged" ? "fallback" : "typical");
+  var tdee = null;
+  if (b !== null) tdee = useLogged ? (b * 1.2 + win.mean) : (b * act);
   var g = goalById(pr.goal);
   var target = tdee === null ? null : tdee + g.delta;
   return {
     kg: kg, weighedOn: lw ? lw.key : null, age: age, cm: pr.heightCm, sex: pr.sex,
-    bmr: b, tdee: tdee, goal: g, target: target,
+    bmr: b, tdee: tdee, goal: g, target: target, basis: basis, win: win, act: act,
     bmi: bmiOf(kg, pr.heightCm),
     missing: [
       kg === null ? "a weight" : null,
@@ -595,7 +615,8 @@ function saveCache(){
     settings: state.settings,
     settingsUpdatedAt: state.settingsUpdatedAt || null,
     days: state.days,
-    weights: state.weights
+    weights: state.weights,
+    exercise: state.exercise
   }));
 }
 function saveUi(){ lsSet(UI_KEY, JSON.stringify(ui)); }
@@ -609,6 +630,7 @@ function loadCache(){
       if (c && c.settingsUpdatedAt) state.settingsUpdatedAt = c.settingsUpdatedAt;
       if (c && c.days) state.days = c.days;
       if (c && c.weights) state.weights = c.weights;
+      if (c && c.exercise) state.exercise = c.exercise;
     } catch(e){}
   }
   var u = lsGet(UI_KEY);
@@ -689,7 +711,8 @@ function payload(){
     settingsUpdatedAt: state.settingsUpdatedAt || null,
     settings: state.settings,
     days: state.days,
-    weights: state.weights
+    weights: state.weights,
+    exercise: state.exercise
   };
 }
 function gistFiles(){
@@ -722,6 +745,16 @@ function mergeRemote(remote){
       if (!rw || typeof rw.kg !== "number") continue;
       if (!lw || !lw.updatedAt || (rw.updatedAt && rw.updatedAt > lw.updatedAt)){
         state.weights[k] = { kg: rw.kg, updatedAt: rw.updatedAt || null };
+        changed = true;
+      }
+    }
+  }
+  if (remote && remote.exercise){
+    for (k in remote.exercise){
+      var re = remote.exercise[k], le = state.exercise[k];
+      if (!re || typeof re.kcal !== "number") continue;
+      if (!le || !le.updatedAt || (re.updatedAt && re.updatedAt > le.updatedAt)){
+        state.exercise[k] = { kcal: re.kcal, updatedAt: re.updatedAt || null };
         changed = true;
       }
     }
@@ -1045,6 +1078,38 @@ function renderToday(root){
   wbox.appendChild(el("span","unit", unitLabel()));
   wrow.appendChild(wbox);
   root.appendChild(wrow);
+
+  /* exercise - active calories, because that is what a watch reports */
+  var xrow = el("div","extras");
+  var xt = el("div","t");
+  xt.appendChild(el("b","","Exercise"));
+  var curEx = getEx(k), xwin = activeWindow(14);
+  xt.appendChild(el("small","", xwin.logged >= 3
+    ? "Averaging " + Math.round(xwin.mean) + " cal a day over 14 days"
+    : "Active calories. Your watch's move number, or a guess."));
+  xrow.appendChild(xt);
+  var xbox = el("div","wbox");
+  var xIn = el("input");
+  xIn.type = "number"; xIn.step = "10"; xIn.min = "0";
+  xIn.setAttribute("inputmode","numeric");
+  xIn.id = "exField";
+  xIn.placeholder = "\u2014";
+  xIn.setAttribute("aria-label","Active calories burned this day");
+  xIn.value = curEx === null ? "" : String(Math.round(curEx));
+  var xTimer = null;
+  xIn.addEventListener("input", function(){
+    clearTimeout(xTimer);
+    var raw = xIn.value;
+    xTimer = setTimeout(function(){
+      if (raw.trim() === "") setEx(k, null);
+      else { var v = parseFloat(raw); if (!isNaN(v) && v >= 0) setEx(k, v); }
+    }, 700);
+  });
+  xIn.addEventListener("change", function(){ setTimeout(render, 750); });
+  xbox.appendChild(xIn);
+  xbox.appendChild(el("span","unit","cal"));
+  xrow.appendChild(xbox);
+  root.appendChild(xrow);
 
   /* note */
   var nw = el("div","notewrap");
@@ -1572,9 +1637,27 @@ function renderSetup(root){
     [{v:"",t:"Not set"},{v:"male",t:"Male"},{v:"female",t:"Female"}], pr.sex || "",
     function(v){ state.settings.profile.sex = v || null; persistSettings(); render(); }));
 
-  cB.appendChild(selectRow("Exercise", "How hard a normal week is", "actSel",
-    ACTIVITY.map(function(a){ return { v:String(a.v), t:a.label }; }), String(pr.activity),
-    function(v){ state.settings.profile.activity = parseFloat(v); persistSettings(); render(); }));
+  cB.appendChild(selectRow("Exercise", "Exercise varies day to day; pick how to account for it", "basisSel",
+    [{v:"typical",t:"Assume a typical week"},{v:"logged",t:"Use what I log each day"}],
+    pr.activityMode || "typical",
+    function(v){ state.settings.profile.activityMode = v; persistSettings(); render(); }));
+
+  if ((pr.activityMode || "typical") === "typical"){
+    cB.appendChild(selectRow("Typical week", "One multiplier for every day", "actSel",
+      ACTIVITY.map(function(a){ return { v:String(a.v), t:a.label + "  \u00b7  " + a.v }; }),
+      String(pr.activity),
+      function(v){ state.settings.profile.activity = parseFloat(v); persistSettings(); render(); }));
+  } else {
+    var xw = activeWindow(14);
+    var rX = el("div","frow");
+    var lX = el("label");
+    lX.appendChild(document.createTextNode("Logged so far"));
+    lX.appendChild(el("small","", xw.logged >= 3
+      ? xw.logged + " of the last 14 days, averaging " + Math.round(xw.mean) + " cal a day. Unlogged days count as zero."
+      : xw.logged + " of the last 14 days. Three are needed before this replaces the typical week."));
+    rX.appendChild(lX);
+    cB.appendChild(rX);
+  }
 
   cB.appendChild(selectRow("Goal", null, "goalSel",
     GOALS.map(function(g){ return { v:g.id, t:g.label + (g.delta ? " · " + rateLabel(g.delta) : "") }; }),
@@ -1590,16 +1673,28 @@ function renderSetup(root){
     var grid = el("div","wk-sum");
     grid.style.marginTop = "12px";
     grid.appendChild(cellBox("Weight", fmt1(fromKg(e.kg)), unitLabel() + ", on " + shortDate(e.weighedOn), null));
-    grid.appendChild(cellBox("BMI", e.bmi.toFixed(1), bmiBandLabel(e.bmi), bmiColor(e.bmi)));
+    grid.appendChild(cellBox("BMI", e.bmi.toFixed(1),
+      "at " + (state.settings.units === "kg" ? Math.round(e.cm) + " cm"
+             : Math.floor(e.cm / 2.54 / 12) + " ft " + Math.round(e.cm / 2.54 - Math.floor(e.cm / 2.54 / 12) * 12) + " in"),
+      null));
     grid.appendChild(cellBox("Maintain", String(Math.round(e.tdee)), "cal a day", null));
     sB.appendChild(grid);
 
     var tp = el("div","targetpanel");
     tp.appendChild(el("div","k","Suggested daily target"));
     tp.appendChild(el("div","v", Math.round(e.target) + " cal"));
-    tp.appendChild(el("div","d", e.goal.label.toLowerCase() +
-      ". Resting burn " + Math.round(e.bmr) + ", times " + pr.activity + " for exercise" +
+    var how;
+    if (e.basis === "logged"){
+      how = "Resting burn " + Math.round(e.bmr) + " × 1.2 for ordinary living, plus " +
+            Math.round(e.win.mean) + " cal a day of logged exercise";
+    } else {
+      how = "Resting burn " + Math.round(e.bmr) + " × " + e.act + " for a typical week";
+    }
+    tp.appendChild(el("div","d", e.goal.label.toLowerCase() + ". " + how +
       (e.goal.delta ? ", " + (e.goal.delta < 0 ? "minus " : "plus ") + Math.abs(e.goal.delta) : "") + "."));
+    if (e.basis === "fallback"){
+      tp.appendChild(el("div","d","Set to use logged exercise, but fewer than three of the last 14 days have any. Using the typical week until then."));
+    }
     sB.appendChild(tp);
 
     if (e.target < e.bmr){
@@ -1742,11 +1837,6 @@ function rateLabel(delta){
   var lbWk = Math.abs(delta) * 7 / 3500;
   return state.settings.units === "kg" ? fmt1(lbToKg(lbWk) * 10 / 10) + " kg a week"
                                        : fmt1(lbWk) + " lb a week";
-}
-function bmiColor(v){
-  var b = bmiBand(v);
-  return b === "healthy" ? "var(--r-perfect)" : b === "over" ? "var(--r-bad)"
-       : b === "obese" ? "var(--r-terrible)" : "var(--r-bad)";
 }
 function selectRow(labelText, hint, id, opts, current, onChange){
   var r = el("div","frow");
