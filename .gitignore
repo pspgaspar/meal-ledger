@@ -1,0 +1,5 @@
+.DS_Store
+*.log
+
+# Machine-local instructions: names client project folders, stays off the public repo
+CLAUDE.md
