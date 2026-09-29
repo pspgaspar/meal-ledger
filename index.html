@@ -283,6 +283,19 @@ svg.chart .wdot-last{fill:var(--accent)}
 svg.chart .maline{fill:none;stroke:var(--accent);stroke-width:2;stroke-linejoin:round;stroke-linecap:round}
 .targetpanel{border:1px solid var(--accent);border-radius:12px;background:var(--surface);
   padding:13px 15px;margin-top:10px}
+.splitrow{display:flex;align-items:center;gap:12px;padding:10px 12px;
+  border-top:1px solid var(--rule-soft)}
+.splitrow:first-child{border-top:none}
+.splitrow .nm{flex:1;min-width:0}
+.splitrow .nm b{display:block;font-size:13px;font-weight:600}
+.splitrow .nm small{display:block;color:var(--ink-faint);font-size:11.5px;
+  font-family:var(--font-num);font-variant-numeric:tabular-nums}
+.splitrow.total{background:var(--surface-2)}
+.splitrow.total.off .totpct{color:var(--r-terrible)}
+.pctbox{display:flex;align-items:center;gap:5px;flex:none}
+.pctbox input{width:64px;text-align:right}
+.totpct{display:inline-block;min-width:64px;text-align:right;
+  font-family:var(--font-num);font-size:15px;font-weight:600;font-variant-numeric:tabular-nums}
 .suggest{display:flex;align-items:center;gap:12px;margin-top:10px;
   border:1px solid var(--accent);border-radius:12px;background:var(--surface);padding:11px 13px}
 .suggest .t{flex:1;min-width:0}
@@ -351,17 +364,35 @@ var ACTIVITY = [
 ];
 /* Ids are kept stable because they are stored in settings; a renamed id would
    silently reset a saved goal to the first entry. */
-var GOALS = [
-  { id:"maintain", delta:0,     label:"Stay where I am" },
-  { id:"lose250",  delta:-250,  label:"Lose slowly" },
-  { id:"lose500",  delta:-500,  label:"Lose steadily" },
-  { id:"lose750",  delta:-750,  label:"Lose fast" },
-  { id:"lose1000", delta:-1000, label:"Lose very fast" },
-  { id:"lose1500", delta:-1500, label:"Aggressive" },
-  { id:"gain250",  delta:250,   label:"Gain slowly" }
-];
 /* Roughly 3500 kcal per pound, 7700 per kilo. */
 function kcalPerUnit(){ return state.settings.units === "kg" ? 7700 : 3500; }
+/* Goal weight plus a deadline, rather than an abstract rate. Returns null when
+   there is not enough to work with. */
+function plan(){
+  var pr = state.settings.profile;
+  var e = energy();
+  if (e.tdee === null) return null;
+  var goalKg = pr.goalWeightKg;
+  var weeks = Number(pr.goalWeeks);
+  if (!goalKg || !isFinite(weeks) || weeks < 1){
+    return { holding:true, e:e, target:Math.round(e.tdee) };
+  }
+  var toLose = fromKg(e.kg) - fromKg(goalKg);        /* display units, +ve = lose */
+  var perWeek = toLose / weeks;
+  var dailyDelta = -(perWeek * kcalPerUnit() / 7);
+  var target = e.tdee + dailyDelta;
+  var maxRate = maxFatRate(e.kg);
+  var minWeeks = (toLose > 0 && maxRate) ? Math.ceil(toLose / maxRate) : null;
+  var by = new Date();
+  by.setDate(by.getDate() + Math.round(weeks * 7));
+  return {
+    holding:false, e:e, goalKg:goalKg, weeks:weeks, toLose:toLose, perWeek:perWeek,
+    dailyDelta:dailyDelta, target:target, maxRate:maxRate, minWeeks:minWeeks, by:by,
+    tooFast: (minWeeks !== null && weeks < minWeeks),
+    belowBmr: (target < e.bmr)
+  };
+}
+
 /* The most that can plausibly come off as fat: about 1% of bodyweight a week. */
 function maxFatRate(kg){
   if (!kg) return null;
@@ -371,16 +402,16 @@ function maxFatRate(kg){
 var DEFAULT_SETTINGS = {
   dailyTarget: null,
   units: "lb",
-  profile: { dob:null, heightCm:null, sex:null, activity:1.725, goal:"maintain", activityMode:"typical", assumedActive:500 },
+  profile: { dob:null, heightCm:null, sex:null, activity:1.725, activityMode:"estimate", assumedActive:500, goalWeightKg:null, goalWeeks:12 },
   extraPenalty: 1,
   extraCap: 3,
   weekStartsOn: 1,
   slots: [
-    { id:"breakfast", label:"Breakfast", target:null, optional:false },
-    { id:"lunch",     label:"Lunch",     target:null, optional:false },
-    { id:"dinner",    label:"Dinner",    target:null, optional:false },
-    { id:"snack1",    label:"Snack 1",   target:null, optional:false },
-    { id:"snack2",    label:"Snack 2",   target:null, optional:true  }
+    { id:"breakfast", label:"Breakfast", pct:22, optional:false },
+    { id:"lunch",     label:"Lunch",     pct:30, optional:false },
+    { id:"dinner",    label:"Dinner",    pct:30, optional:false },
+    { id:"snack1",    label:"Snack 1",   pct:10, optional:false },
+    { id:"snack2",    label:"Snack 2",   pct:8,  optional:true  }
   ],
   ratings: [
     { id:"perfect",  label:"Perfect",  points: 2, desc:"On target or under. No notes." },
@@ -600,9 +631,18 @@ function bmiOf(kg, cm){
   var m = cm / 100;
   return kg / (m * m);
 }
-function goalById(id){
-  for (var i=0;i<GOALS.length;i++) if (GOALS[i].id === id) return GOALS[i];
-  return GOALS[0];
+/* A slot's calories are always derived, never stored: change the daily target
+   or a share and every slot follows immediately. */
+function slotCal(i){
+  var dt = Number(state.settings.dailyTarget);
+  var pct = Number(state.settings.slots[i].pct);
+  if (!dt || dt <= 0 || !isFinite(pct) || pct < 0) return null;
+  return Math.round(dt * pct / 100);
+}
+function pctTotal(){
+  var t = 0;
+  for (var i=0;i<state.settings.slots.length;i++) t += Number(state.settings.slots[i].pct) || 0;
+  return Math.round(t * 10) / 10;
 }
 /* Everything the calculator needs, or nulls saying what is still missing. */
 function energy(){
@@ -626,13 +666,9 @@ function energy(){
     else if (mode === "typical") tdee = b * act;
     else tdee = b * 1.2 + assumed;        /* "estimate", and the logged fallback */
   }
-  var g = goalById(pr.goal);
-  var gd = g.delta;
-  var target = tdee === null ? null : tdee + gd;
   return {
     kg: kg, weighedOn: lw ? lw.key : null, age: age, cm: pr.heightCm, sex: pr.sex,
-    bmr: b, tdee: tdee, goal: g, gd: gd, target: target, basis: basis, win: win,
-    act: act, assumed: assumed,
+    bmr: b, tdee: tdee, basis: basis, win: win, act: act, assumed: assumed,
     bmi: bmiOf(kg, pr.heightCm),
     missing: [
       kg === null ? "a weight" : null,
@@ -699,6 +735,17 @@ function mergeSettings(cfg){
   for (k in out) if (cfg[k] !== undefined && cfg[k] !== null) out[k] = cfg[k];
   if (!Array.isArray(out.slots) || !out.slots.length) out.slots = clone(DEFAULT_SETTINGS.slots);
   if (!Array.isArray(out.ratings) || !out.ratings.length) out.ratings = clone(DEFAULT_SETTINGS.ratings);
+  /* Older settings stored an absolute calorie figure per slot. Convert it to a
+     share of the day so a hand-tuned split is not thrown away. */
+  var dt = Number(out.dailyTarget) || 0;
+  var defPct = [22, 30, 30, 10, 8];
+  out.slots = out.slots.map(function(sl, i){
+    var o = { id: sl.id, label: sl.label, optional: !!sl.optional };
+    if (typeof sl.pct === "number" && isFinite(sl.pct)) o.pct = sl.pct;
+    else if (dt > 0 && typeof sl.target === "number") o.pct = Math.round(sl.target / dt * 1000) / 10;
+    else o.pct = defPct[i] !== undefined ? defPct[i] : 0;
+    return o;
+  });
   var pr = clone(DEFAULT_SETTINGS.profile);
   if (cfg.profile && typeof cfg.profile === "object")
     for (k in pr) if (cfg.profile[k] !== undefined && cfg.profile[k] !== null) pr[k] = cfg.profile[k];
@@ -1071,7 +1118,7 @@ function renderToday(root){
 
   if (!targetsConfigured()){
     var hb = el("div","hintbar");
-    hb.appendChild(document.createTextNode("Calorie targets aren’t set, so slots show no hint yet. "));
+    hb.appendChild(document.createTextNode("No daily target yet, so slots show no hint. "));
     var b = el("button", null, "Set them in Setup");
     b.addEventListener("click", function(){ ui.view = "setup"; saveUi(); render(); });
     hb.appendChild(b);
@@ -1079,12 +1126,13 @@ function renderToday(root){
     root.appendChild(hb);
   }
 
-  state.settings.slots.forEach(function(slot){
+  state.settings.slots.forEach(function(slot, si){
     var s = el("div","slot");
     var h = el("div","slot-head");
     h.appendChild(el("div","slot-name", slot.label));
     if (slot.optional) h.appendChild(el("span","slot-opt","Optional"));
-    if (slot.target) h.appendChild(el("div","slot-meta","≈ " + slot.target + " cal"));
+    var sc = slotCal(si);
+    if (sc) h.appendChild(el("div","slot-meta","≈ " + sc + " cal"));
     s.appendChild(h);
 
     var pills = el("div","pills");
@@ -1228,9 +1276,7 @@ function warnBar(lead, linkText, tail){
   return b;
 }
 function targetsConfigured(){
-  for (var i=0;i<state.settings.slots.length;i++)
-    if (state.settings.slots[i].target) return true;
-  return false;
+  return !!(Number(state.settings.dailyTarget) > 0);
 }
 
 /* ---------------- week ---------------- */
@@ -1596,37 +1642,6 @@ function renderSetup(root){
   s2.appendChild(c2);
   root.appendChild(s2);
 
-  /* --- targets --- */
-  var s3 = el("div","sec");
-  s3.appendChild(el("h2","","Calorie targets"));
-  s3.appendChild(el("p","sub","Optional. These only ever show as a grey hint on the logging screen — nothing is calculated from them."));
-  var c3 = el("div","card");
-  c3.appendChild(numRow("Daily target", "dailyTarget", state.settings.dailyTarget,
-    "Your whole-day number", function(v){ state.settings.dailyTarget = v; }));
-  state.settings.slots.forEach(function(slot, i){
-    c3.appendChild(numRow(slot.label, "slot-"+slot.id, slot.target,
-      slot.optional ? "Optional slot" : null, function(v){ state.settings.slots[i].target = v; }));
-  });
-  s3.appendChild(c3);
-  var br = el("div","btnrow");
-  var split = el("button","btn");
-  split.type="button";
-  split.textContent = "Split daily target across slots";
-  split.addEventListener("click", function(){
-    var total = Number(state.settings.dailyTarget)||0;
-    if (!total){ toast("Set a daily target first", true); return; }
-    var share = [0.22,0.30,0.30,0.10,0.08];
-    state.settings.slots.forEach(function(sl,i){
-      sl.target = Math.round(total*(share[i]!==undefined?share[i]:0.1)/10)*10;
-    });
-    persistSettings(); render();
-    toast("Split — adjust any of them");
-  });
-  br.appendChild(split);
-  s3.appendChild(br);
-  s3.appendChild(el("div","status","A split is only a starting point. Edit any slot afterwards."));
-  root.appendChild(s3);
-
   /* --- week --- */
   var s4 = el("div","sec");
   s4.appendChild(el("h2","","Week"));
@@ -1747,9 +1762,26 @@ function renderSetup(root){
     cB.appendChild(rX);
   }
 
-  cB.appendChild(selectRow("Goal", null, "goalSel",
-    GOALS.map(function(g){ return { v:g.id, t:g.label + (g.delta ? " · " + rateLabel(g.delta) : "") }; }),
-    pr.goal, function(v){ state.settings.profile.goal = v; persistSettings(); render(); }));
+  var lw0 = latestWeight();
+  var rGW = el("div","frow");
+  var lGW = el("label"); lGW.htmlFor = "goalWeight";
+  lGW.appendChild(document.createTextNode("Goal weight"));
+  lGW.appendChild(el("small","", (lw0 && pr.goalWeightKg)
+    ? fmt1(Math.abs(fromKg(lw0.kg) - fromKg(pr.goalWeightKg))) + " " + unitLabel() + " to go"
+    : "Leave blank to just hold steady"));
+  var iGW = el("input"); iGW.type = "number"; iGW.step = "0.1"; iGW.min = "0"; iGW.id = "goalWeight";
+  iGW.placeholder = "—";
+  iGW.value = pr.goalWeightKg ? fmt1(fromKg(pr.goalWeightKg)) : "";
+  iGW.addEventListener("change", function(){
+    var v = parseFloat(iGW.value);
+    state.settings.profile.goalWeightKg = (!isNaN(v) && v > 0) ? toKg(v) : null;
+    persistSettings(); render();
+  });
+  rGW.appendChild(lGW); rGW.appendChild(iGW);
+  cB.appendChild(rGW);
+
+  cB.appendChild(numRow("Reach it in", "goalWeeks", pr.goalWeeks, "weeks from today",
+    function(v){ state.settings.profile.goalWeeks = v; }));
 
   sB.appendChild(cB);
 
@@ -1778,68 +1810,75 @@ function renderSetup(root){
     sB.appendChild(el("div","status","Add " + listJoin(e.missing) +
       " and the estimate appears here." + (e.kg === null ? " Weight is entered on the Today screen." : "")));
   } else {
+    var pl = plan();
     var grid = el("div","wk-sum");
     grid.style.marginTop = "12px";
-    grid.appendChild(cellBox("Weight", fmt1(fromKg(e.kg)), unitLabel() + ", on " + shortDate(e.weighedOn), null));
-    grid.appendChild(cellBox("BMI", e.bmi.toFixed(1),
-      "at " + (state.settings.units === "kg" ? Math.round(e.cm) + " cm"
-             : Math.floor(e.cm / 2.54 / 12) + " ft " + Math.round(e.cm / 2.54 - Math.floor(e.cm / 2.54 / 12) * 12) + " in"),
-      null));
+    grid.appendChild(cellBox("Now", fmt1(fromKg(e.kg)), unitLabel() + " on " + shortDate(e.weighedOn), null));
+    grid.appendChild(cellBox("BMI", e.bmi.toFixed(1), "at " + heightLabel(e.cm), null));
     grid.appendChild(cellBox("Maintain", String(Math.round(e.tdee)),
-      "cal a day to hold " + fmt1(fromKg(e.kg)) + " " + unitLabel(), null));
+      "cal to stay at " + fmt1(fromKg(e.kg)), null));
     sB.appendChild(grid);
 
     var tp = el("div","targetpanel");
-    tp.appendChild(el("div","k","Suggested daily target"));
-    tp.appendChild(el("div","v", Math.round(e.target) + " cal"));
-    var how;
-    if (e.basis === "logged"){
-      how = "Resting burn " + Math.round(e.bmr) + " plus 20% for ordinary living, plus the " +
-            Math.round(e.win.mean) + " cal a day you logged, giving " + Math.round(e.tdee);
-    } else if (e.basis === "typical"){
-      how = "Resting burn " + Math.round(e.bmr) + " multiplied by " + e.act +
-            " for a typical week, giving " + Math.round(e.tdee);
+    if (pl.holding){
+      tp.appendChild(el("div","k","Daily target"));
+      tp.appendChild(el("div","v", Math.round(pl.target) + " cal"));
+      tp.appendChild(el("div","d","No goal weight set, so this holds you where you are. " + howText(e) + "."));
     } else {
-      how = "Resting burn " + Math.round(e.bmr) + " plus 20% for ordinary living, plus " +
-            Math.round(e.assumed) + " cal a day of exercise, giving " + Math.round(e.tdee);
+      tp.appendChild(el("div","k","To reach " + fmt1(fromKg(pl.goalKg)) + " " + unitLabel() +
+        " in " + pl.weeks + " week" + (pl.weeks === 1 ? "" : "s")));
+      tp.appendChild(el("div","v", Math.round(pl.target) + " cal"));
+      tp.appendChild(el("div","d",
+        fmt1(Math.abs(pl.toLose)) + " " + unitLabel() + " to " + (pl.toLose >= 0 ? "lose" : "gain") +
+        ", so " + fmt1(Math.abs(pl.perWeek)) + " " + unitLabel() + " a week, arriving " +
+        pl.by.getDate() + " " + MON[pl.by.getMonth()] + ". " + howText(e) + ", " +
+        (pl.dailyDelta < 0 ? "minus " : "plus ") + Math.abs(Math.round(pl.dailyDelta)) + "."));
     }
-    tp.appendChild(el("div","d", e.goal.label.toLowerCase() + ". " + how +
-      (e.goal.delta ? ", " + (e.goal.delta < 0 ? "minus " : "plus ") + Math.abs(e.goal.delta) : "") + "."));
     if (e.basis === "fallback"){
       tp.appendChild(el("div","d","Set to use logged exercise, but fewer than three of the last 14 days have any. Using your assumed " + Math.round(e.assumed) + " a day until then."));
     }
     sB.appendChild(tp);
 
-    var mfr = maxFatRate(e.kg);
-    var rate = Math.abs(e.gd) * 7 / (state.settings.units === "kg" ? 7700 : 3500);
-    if (e.gd < 0 && mfr && rate > mfr + 0.05){
+    if (!pl.holding && pl.tooFast){
       sB.appendChild(el("div","status",
-        "At " + fmt1(fromKg(e.kg)) + " " + unitLabel() + ", about " + fmt1(mfr) + " " + unitLabel() +
-        " a week is the most that can come off as fat. Past that the extra is lean tissue and water, and it comes back."));
+        "At " + fmt1(fromKg(e.kg)) + " " + unitLabel() + ", about " + fmt1(pl.maxRate) + " " +
+        unitLabel() + " a week is the most that can come off as fat, so " +
+        fmt1(Math.abs(pl.toLose)) + " " + unitLabel() + " needs at least " + pl.minWeeks +
+        " weeks. Faster than that and the difference is lean tissue and water."));
+      var brF = el("div","btnrow");
+      var fixB = el("button","btn");
+      fixB.type = "button";
+      fixB.textContent = "Stretch to " + pl.minWeeks + " weeks";
+      fixB.addEventListener("click", function(){
+        state.settings.profile.goalWeeks = pl.minWeeks;
+        persistSettings(); render();
+        toast("Now aiming for " + pl.minWeeks + " weeks");
+      });
+      brF.appendChild(fixB);
+      sB.appendChild(brF);
     }
-    if (e.target < e.bmr){
+    if (!pl.holding && pl.belowBmr){
       sB.appendChild(el("div","status warn",
-        "That target is below your resting burn of " + Math.round(e.bmr) +
-        ". Worth easing the goal rather than holding this."));
+        "That is below your resting burn of " + Math.round(e.bmr) + ", which is what your body uses doing nothing at all."));
     }
 
+    var applied = state.settings.dailyTarget === Math.round(pl.target);
     var brT = el("div","btnrow");
     var useBtn = el("button","btn primary wide");
     useBtn.type = "button";
-    useBtn.textContent = state.settings.dailyTarget === Math.round(e.target)
-      ? "Daily target is set to " + Math.round(e.target)
-      : "Use " + Math.round(e.target) + " as my daily target";
-    useBtn.disabled = state.settings.dailyTarget === Math.round(e.target);
+    useBtn.textContent = applied ? "This is your daily target"
+                                 : "Use " + Math.round(pl.target) + " as my daily target";
+    useBtn.disabled = applied;
     useBtn.addEventListener("click", function(){
-      state.settings.dailyTarget = Math.round(e.target);
+      state.settings.dailyTarget = Math.round(pl.target);
       persistSettings(); render();
-      toast("Daily target set — now split it across slots");
+      toast("Daily target set");
     });
     brT.appendChild(useBtn);
     sB.appendChild(brT);
-    sB.appendChild(el("div","status","Then use Split daily target across slots above, so each meal shows its own hint."));
   }
   root.appendChild(sB);
+  root.appendChild(renderSplit());
 
   /* --- data --- */
   var s5 = el("div","sec");
@@ -1972,16 +2011,104 @@ function roRow(labelText, id, value){
   r.appendChild(l); r.appendChild(i);
   return r;
 }
+function heightLabel(cm){
+  if (state.settings.units === "kg") return Math.round(cm) + " cm";
+  var ft = Math.floor(cm / 2.54 / 12), inch = Math.round(cm / 2.54 - ft * 12);
+  if (inch === 12){ ft++; inch = 0; }
+  return ft + " ft " + inch + " in";
+}
+function howText(e){
+  if (e.basis === "logged")
+    return "Resting burn " + Math.round(e.bmr) + " plus 20% for ordinary living, plus the " +
+           Math.round(e.win.mean) + " cal a day you logged";
+  if (e.basis === "typical")
+    return "Resting burn " + Math.round(e.bmr) + " multiplied by " + e.act + " for a typical week";
+  return "Resting burn " + Math.round(e.bmr) + " plus 20% for ordinary living, plus " +
+         Math.round(e.assumed) + " cal a day of exercise";
+}
+
+/* Shares, not calorie figures. Change the daily target and every meal follows. */
+function renderSplit(){
+  var dt = Number(state.settings.dailyTarget) || 0;
+  var sec = el("div","sec");
+  sec.appendChild(el("h2","","Meal split"));
+  sec.appendChild(el("p","sub", dt
+    ? "How your " + dt + " calories divide across the day. Set the share and the calories follow."
+    : "Set a daily target above and this divides it across your meals."));
+
+  var card = el("div","card");
+  state.settings.slots.forEach(function(sl, i){
+    var r = el("div","splitrow");
+    var nm = el("div","nm");
+    nm.appendChild(el("b","", sl.label));
+    var cal = slotCal(i);
+    nm.appendChild(el("small","", cal === null
+      ? (sl.optional ? "optional" : "\u2014")
+      : (cal === 0 ? "skipped" : cal + " cal") + (sl.optional ? "  \u00b7  optional" : "")));
+    r.appendChild(nm);
+    var box = el("div","pctbox");
+    var inp = el("input");
+    inp.type = "number"; inp.id = "pct-" + sl.id;
+    inp.min = "0"; inp.max = "100"; inp.step = "1";
+    inp.setAttribute("inputmode","numeric");
+    inp.value = sl.pct;
+    inp.setAttribute("aria-label","Share of the day for " + sl.label);
+    inp.addEventListener("change", function(){
+      var v = parseFloat(inp.value);
+      state.settings.slots[i].pct = isNaN(v) ? 0 : Math.max(0, Math.min(100, v));
+      persistSettings(); render();
+    });
+    box.appendChild(inp);
+    box.appendChild(el("span","unit","%"));
+    r.appendChild(box);
+    card.appendChild(r);
+  });
+
+  var tot = pctTotal(), off = Math.abs(tot - 100) > 0.5, sumCal = 0;
+  for (var i=0;i<state.settings.slots.length;i++) sumCal += slotCal(i) || 0;
+  var tr = el("div","splitrow total" + (off ? " off" : ""));
+  var tn = el("div","nm");
+  tn.appendChild(el("b","","Total"));
+  tn.appendChild(el("small","", dt ? sumCal + " cal" : ""));
+  tr.appendChild(tn);
+  var tb = el("div","pctbox");
+  tb.appendChild(el("span","totpct", String(tot)));
+  tb.appendChild(el("span","unit","%"));
+  tr.appendChild(tb);
+  card.appendChild(tr);
+  sec.appendChild(card);
+
+  if (off){
+    sec.appendChild(el("div","status warn",
+      "The shares add up to " + tot + "%, so your meals come to " + sumCal +
+      " rather than " + dt + "."));
+  }
+
+  var br = el("div","btnrow");
+  var evenB = el("button","btn");
+  evenB.type = "button"; evenB.textContent = "Even split";
+  evenB.addEventListener("click", function(){
+    var n = state.settings.slots.length;
+    state.settings.slots.forEach(function(sl){ sl.pct = Math.round(1000 / n) / 10; });
+    persistSettings(); render();
+  });
+  var defB = el("button","btn");
+  defB.type = "button"; defB.textContent = "Reset to 22/30/30/10/8";
+  defB.addEventListener("click", function(){
+    var d = [22,30,30,10,8];
+    state.settings.slots.forEach(function(sl, i){ sl.pct = d[i] !== undefined ? d[i] : 0; });
+    persistSettings(); render();
+  });
+  br.appendChild(evenB); br.appendChild(defB);
+  sec.appendChild(br);
+  return sec;
+}
+
 function shortDate(k){ var d = parseKey(k); return d.getDate() + " " + MON[d.getMonth()]; }
 function fmt1(n){ return (Math.round(n * 10) / 10).toFixed(1); }
 function listJoin(a){
   if (a.length === 1) return a[0];
   return a.slice(0, -1).join(", ") + " and " + a[a.length - 1];
-}
-function rateLabel(delta){
-  var lbWk = Math.abs(delta) * 7 / 3500;
-  return state.settings.units === "kg" ? fmt1(lbToKg(lbWk) * 10 / 10) + " kg a week"
-                                       : fmt1(lbWk) + " lb a week";
 }
 function selectRow(labelText, hint, id, opts, current, onChange){
   var r = el("div","frow");
