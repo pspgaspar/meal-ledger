@@ -467,7 +467,7 @@ var TOKEN_KEY = "mealledger.token.v1";
 var GIST_KEY  = "mealledger.gistid.v1";
 var META_KEY  = "mealledger.meta.v1";
 
-var sync = { token:null, gistId:null, status:"off", message:"", lastAt:null, authFailed:false };
+var sync = { token:null, gistId:null, status:"off", message:"", lastAt:null, authFailed:false, pulledOk:false };
 var STALE_DAYS = 3;
 var pushTimer = null, pushing = false, pushAgain = false;
 
@@ -643,6 +643,7 @@ function pullNow(){
         catch(e){ throw { kind:"parse", message:"That backup could not be read." }; }
         out = mergeRemote(parsed);
       }
+      sync.pulledOk = true;     /* this device has now seen the real backup */
       syncSucceeded();
       setSync("ok", "");
       return out;
@@ -650,7 +651,20 @@ function pullNow(){
     .catch(handleSyncErr);
 }
 
+/* Writes are last-writer-wins, so pushing local state over a backup this
+   device has never read would silently destroy whatever the other device
+   logged. Read first, always; only then write. */
 function pushNow(){
+  if (!sync.token) return Promise.resolve(false);
+  if (!sync.pulledOk){
+    return pullNow().then(function(){
+      if (!sync.pulledOk) return false;   /* still could not read it: do not write */
+      return doPush();
+    });
+  }
+  return doPush();
+}
+function doPush(){
   if (!sync.token) return Promise.resolve(false);
   if (pushing){ pushAgain = true; return Promise.resolve(false); }
   pushing = true;
@@ -676,11 +690,20 @@ function connectToken(tok){
   sync.token = tok;
   lsSet(TOKEN_KEY, tok);
   sync.gistId = null; lsSet(GIST_KEY, "");
+  sync.pulledOk = false;
   setSync("syncing", "Connecting...");
-  return pullNow().then(function(){ return pushNow(); }).then(function(){ render(); });
+  return pullNow().then(function(){
+    if (!sync.pulledOk){
+      /* Could not read the existing backup. Writing now would overwrite it
+         with this device's state, which may be empty. Stop. */
+      render();
+      return false;
+    }
+    return doPush().then(function(){ render(); return true; });
+  });
 }
 function disconnectSync(){
-  sync.token = null; sync.gistId = null; sync.lastAt = null; sync.authFailed = false;
+  sync.token = null; sync.gistId = null; sync.lastAt = null; sync.authFailed = false; sync.pulledOk = false;
   lsSet(TOKEN_KEY, ""); lsSet(GIST_KEY, ""); lsSet(META_KEY, "");
   setSync("off", "");
   render();
@@ -1231,14 +1254,22 @@ function renderSetup(root){
 
   /* --- data --- */
   var s5 = el("div","sec");
-  s5.appendChild(el("h2","","Backup"));
+  s5.appendChild(el("h2","","Backup and sync"));
   var dayCount = Object.keys(state.days).filter(function(k){ return dayHasData(state.days[k]); }).length;
   var connected = !!sync.token;
 
-  s5.appendChild(el("p","sub", dayCount + (dayCount===1 ? " day" : " days") + " logged. " +
-    (connected
-      ? "Every change is copied to a secret Gist on your GitHub account."
-      : "Right now this data lives only in this browser. Connect a backup so clearing it costs you nothing.")));
+  var sub;
+  if (connected){
+    sub = dayCount + (dayCount===1 ? " day" : " days") + " logged here. Every change is copied to a " +
+          "secret Gist on your GitHub account, and any other device on the same Gist stays in step.";
+  } else if (dayCount === 0){
+    sub = "Nothing logged in this browser yet. If you already track on another device, connecting " +
+          "below pulls all of it down here. This is how you restore, not just how you back up.";
+  } else {
+    sub = dayCount + (dayCount===1 ? " day" : " days") + " logged. Right now this data lives only in " +
+          "this browser. Connect so clearing it costs you nothing.";
+  }
+  s5.appendChild(el("p","sub", sub));
 
   var c5 = el("div","card");
   if (connected){
@@ -1258,9 +1289,14 @@ function renderSetup(root){
     c5.appendChild(r1);
   } else {
     var steps = el("div","steps");
-    steps.appendChild(stepLine(1, "Create a token on GitHub", "It only needs the single 'gist' box ticked, so it can reach nothing else on your account."));
+    steps.appendChild(stepLine(1, "Create a token on GitHub",
+      "It only needs the single 'gist' box ticked, so it can reach nothing else on your account. " +
+      "A fresh token is fine \u2014 it does not have to be the one you used elsewhere."));
     steps.appendChild(stepLine(2, "Paste it below", "It is stored in this browser only. It never goes into the app's code."));
-    steps.appendChild(stepLine(3, "Done", "Your ratings copy to a secret Gist from then on. Paste the same token on another device to pull everything back."));
+    steps.appendChild(stepLine(3, dayCount === 0 ? "Your data arrives" : "Done",
+      dayCount === 0
+        ? "Anything logged on your other device downloads here, and the two stay in step from then on."
+        : "Your ratings copy to a secret Gist from then on. Connect any other device the same way and they stay in step."));
     c5.appendChild(steps);
   }
   s5.appendChild(c5);
