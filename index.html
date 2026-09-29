@@ -249,6 +249,7 @@ input[type=number]{font-family:var(--font-num);width:78px;text-align:right}
 .btn:active{background:var(--surface-2)}
 .btn.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
 .btn.wide{width:100%}
+.btn[disabled]{opacity:.55;cursor:default}
 .btnrow{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
 .status{font-size:11.5px;color:var(--ink-faint);margin-top:9px;line-height:1.5}
 .status.warn{color:var(--r-bad)}
@@ -271,6 +272,21 @@ a.btn{text-decoration:none;color:inherit}
 .syncdot.ok{background:var(--r-perfect)}
 .syncdot.error{background:var(--r-terrible)}
 .syncdot.syncing{background:var(--r-bad)}
+
+.wbox{display:flex;align-items:center;gap:6px;flex:none}
+.wbox input{width:92px;text-align:right;font-family:var(--font-num)}
+.hbox{display:flex;align-items:center;gap:5px;flex:none}
+.hbox input{width:62px}
+.unit{font-size:12px;color:var(--ink-faint);font-family:var(--font-num)}
+svg.chart .wdot{fill:var(--ink-faint)}
+svg.chart .wdot-last{fill:var(--accent)}
+svg.chart .maline{fill:none;stroke:var(--accent);stroke-width:2;stroke-linejoin:round;stroke-linecap:round}
+.targetpanel{border:1px solid var(--accent);border-radius:12px;background:var(--surface);
+  padding:13px 15px;margin-top:10px}
+.targetpanel .k{font-size:9px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-faint)}
+.targetpanel .v{font-family:var(--font-num);font-size:30px;font-weight:600;line-height:1.15;
+  color:var(--accent);font-variant-numeric:tabular-nums}
+.targetpanel .d{font-size:11.5px;color:var(--ink-faint);line-height:1.45;margin-top:3px}
 
 /* ---------- sync chip ---------- */
 #sync{
@@ -315,8 +331,24 @@ var CACHE_KEY = "mealledger.cache.v1";
 var UI_KEY    = "mealledger.ui.v1";
 var DAY_MS    = 86400000;
 
+var ACTIVITY = [
+  { v:1.2,   label:"Barely any exercise" },
+  { v:1.375, label:"Light, 1 to 3 days a week" },
+  { v:1.55,  label:"Moderate, 3 to 5 days a week" },
+  { v:1.725, label:"Hard, 6 to 7 days a week" },
+  { v:1.9,   label:"Very hard, or a physical job" }
+];
+var GOALS = [
+  { id:"maintain", delta:0,    label:"Stay where I am" },
+  { id:"lose250",  delta:-250, label:"Lose slowly" },
+  { id:"lose500",  delta:-500, label:"Lose steadily" },
+  { id:"gain250",  delta:250,  label:"Gain slowly" }
+];
+
 var DEFAULT_SETTINGS = {
   dailyTarget: null,
+  units: "lb",
+  profile: { dob:null, heightCm:null, sex:null, activity:1.725, goal:"maintain" },
   extraPenalty: 1,
   extraCap: 3,
   weekStartsOn: 1,
@@ -343,7 +375,7 @@ var DOW = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
 var MON = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 
 /* ============================ state ============================ */
-var state = { settings: clone(DEFAULT_SETTINGS), settingsUpdatedAt: null, days: {} };
+var state = { settings: clone(DEFAULT_SETTINGS), settingsUpdatedAt: null, days: {}, weights: {} };
 var ui    = { view:"today", date:todayKey(), noteOpen:false };
 var pendingRender = false;
 
@@ -457,6 +489,93 @@ function weekStats(startK){
   return { net:net, logged:logged, hit:hit, keys:keys };
 }
 
+/* ============================ weight + body ============================ */
+var LB_PER_KG = 2.2046226218;
+function kgToLb(kg){ return kg * LB_PER_KG; }
+function lbToKg(lb){ return lb / LB_PER_KG; }
+function unitLabel(){ return state.settings.units === "kg" ? "kg" : "lb"; }
+function fromKg(kg){ return state.settings.units === "kg" ? kg : kgToLb(kg); }
+function toKg(v){ return state.settings.units === "kg" ? v : lbToKg(v); }
+
+function getWeight(k){
+  var w = state.weights[k];
+  return (w && typeof w.kg === "number") ? w.kg : null;
+}
+function setWeight(k, kg){
+  if (kg === null){ delete state.weights[k]; }
+  else state.weights[k] = { kg: kg, updatedAt: new Date().toISOString() };
+  saveCache();
+  pushSoon();
+}
+function weightKeys(){
+  return Object.keys(state.weights).filter(function(k){ return getWeight(k) !== null; }).sort();
+}
+function latestWeight(){
+  var ks = weightKeys();
+  return ks.length ? { key: ks[ks.length-1], kg: getWeight(ks[ks.length-1]) } : null;
+}
+
+/* Age in whole years, recomputed from the date of birth so it never goes stale. */
+function ageYears(dob){
+  if (!dob) return null;
+  var b = parseKey(dob), n = new Date();
+  var a = n.getFullYear() - b.getFullYear();
+  var m = n.getMonth() - b.getMonth();
+  if (m < 0 || (m === 0 && n.getDate() < b.getDate())) a--;
+  return (a >= 0 && a < 130) ? a : null;
+}
+
+/* Mifflin-St Jeor: the resting estimate clinicians reach for first. */
+function bmrOf(kg, cm, age, sex){
+  if (!kg || !cm || age === null || !sex) return null;
+  var base = 10 * kg + 6.25 * cm - 5 * age;
+  return sex === "female" ? base - 161 : base + 5;
+}
+function bmiOf(kg, cm){
+  if (!kg || !cm) return null;
+  var m = cm / 100;
+  return kg / (m * m);
+}
+function bmiBand(v){
+  if (v === null) return "";
+  if (v < 18.5) return "under";
+  if (v < 25) return "healthy";
+  if (v < 30) return "over";
+  return "obese";
+}
+function bmiBandLabel(v){
+  var b = bmiBand(v);
+  return b === "under" ? "Underweight" : b === "healthy" ? "Healthy range"
+       : b === "over" ? "Overweight" : b === "obese" ? "Obese" : "";
+}
+function goalById(id){
+  for (var i=0;i<GOALS.length;i++) if (GOALS[i].id === id) return GOALS[i];
+  return GOALS[0];
+}
+/* Everything the calculator needs, or nulls saying what is still missing. */
+function energy(){
+  var pr = state.settings.profile || {};
+  var lw = latestWeight();
+  var kg = lw ? lw.kg : null;
+  var age = ageYears(pr.dob);
+  var b = bmrOf(kg, pr.heightCm, age, pr.sex);
+  var act = Number(pr.activity) || 1.2;
+  var tdee = b === null ? null : b * act;
+  var g = goalById(pr.goal);
+  var target = tdee === null ? null : tdee + g.delta;
+  return {
+    kg: kg, weighedOn: lw ? lw.key : null, age: age, cm: pr.heightCm, sex: pr.sex,
+    bmr: b, tdee: tdee, goal: g, target: target,
+    bmi: bmiOf(kg, pr.heightCm),
+    missing: [
+      kg === null ? "a weight" : null,
+      pr.heightCm ? null : "your height",
+      age === null ? "your date of birth" : null,
+      pr.sex ? null : "sex"
+    ].filter(Boolean)
+  };
+}
+
 /* ============================ persistence ============================ */
 /* localStorage is the working copy; a private GitHub Gist is the durable one.
    Every change writes locally first so a tap is never blocked on the network,
@@ -475,7 +594,8 @@ function saveCache(){
   lsSet(CACHE_KEY, JSON.stringify({
     settings: state.settings,
     settingsUpdatedAt: state.settingsUpdatedAt || null,
-    days: state.days
+    days: state.days,
+    weights: state.weights
   }));
 }
 function saveUi(){ lsSet(UI_KEY, JSON.stringify(ui)); }
@@ -488,6 +608,7 @@ function loadCache(){
       if (c && c.settings) state.settings = mergeSettings(c.settings);
       if (c && c.settingsUpdatedAt) state.settingsUpdatedAt = c.settingsUpdatedAt;
       if (c && c.days) state.days = c.days;
+      if (c && c.weights) state.weights = c.weights;
     } catch(e){}
   }
   var u = lsGet(UI_KEY);
@@ -506,6 +627,11 @@ function mergeSettings(cfg){
   for (k in out) if (cfg[k] !== undefined && cfg[k] !== null) out[k] = cfg[k];
   if (!Array.isArray(out.slots) || !out.slots.length) out.slots = clone(DEFAULT_SETTINGS.slots);
   if (!Array.isArray(out.ratings) || !out.ratings.length) out.ratings = clone(DEFAULT_SETTINGS.ratings);
+  var pr = clone(DEFAULT_SETTINGS.profile);
+  if (cfg.profile && typeof cfg.profile === "object")
+    for (k in pr) if (cfg.profile[k] !== undefined && cfg.profile[k] !== null) pr[k] = cfg.profile[k];
+  out.profile = pr;
+  if (out.units !== "kg" && out.units !== "lb") out.units = "lb";
   return out;
 }
 
@@ -562,7 +688,8 @@ function payload(){
     exportedAt: new Date().toISOString(),
     settingsUpdatedAt: state.settingsUpdatedAt || null,
     settings: state.settings,
-    days: state.days
+    days: state.days,
+    weights: state.weights
   };
 }
 function gistFiles(){
@@ -585,6 +712,16 @@ function mergeRemote(remote){
           ratings: r.ratings || {}, extras: Number(r.extras) || 0,
           note: r.note || "", updatedAt: r.updatedAt || null
         };
+        changed = true;
+      }
+    }
+  }
+  if (remote && remote.weights){
+    for (k in remote.weights){
+      var rw = remote.weights[k], lw = state.weights[k];
+      if (!rw || typeof rw.kg !== "number") continue;
+      if (!lw || !lw.updatedAt || (rw.updatedAt && rw.updatedAt > lw.updatedAt)){
+        state.weights[k] = { kg: rw.kg, updatedAt: rw.updatedAt || null };
         changed = true;
       }
     }
@@ -869,6 +1006,46 @@ function renderToday(root){
   ex.appendChild(st);
   root.appendChild(ex);
 
+  /* weight - optional, gaps are expected, never blocks anything */
+  var wrow = el("div","extras");
+  var wt = el("div","t");
+  wt.appendChild(el("b","","Weight"));
+  var curKg = getWeight(k), prev = null, pk = weightKeys();
+  for (var pi = pk.length - 1; pi >= 0; pi--){ if (pk[pi] < k){ prev = pk[pi]; break; } }
+  var wsub = "Optional. Skip any day you don't weigh in.";
+  if (curKg !== null && prev){
+    var dd = fromKg(curKg) - fromKg(getWeight(prev));
+    var pd = parseKey(prev);
+    wsub = (Math.abs(dd) < 0.05 ? "Level" : (dd > 0 ? "+" : "−") + Math.abs(dd).toFixed(1) + " " + unitLabel())
+         + " since " + pd.getDate() + " " + MON[pd.getMonth()];
+  } else if (curKg !== null){
+    wsub = "First weigh-in logged.";
+  }
+  wt.appendChild(el("small","", wsub));
+  wrow.appendChild(wt);
+  var wbox = el("div","wbox");
+  var wIn = el("input");
+  wIn.type = "number"; wIn.step = "0.1"; wIn.min = "0";
+  wIn.setAttribute("inputmode","decimal");
+  wIn.id = "weightField";
+  wIn.placeholder = "—";
+  wIn.setAttribute("aria-label","Weight for this day in " + unitLabel());
+  wIn.value = curKg === null ? "" : String(Math.round(fromKg(curKg) * 10) / 10);
+  var wTimer = null;
+  wIn.addEventListener("input", function(){
+    clearTimeout(wTimer);
+    var raw = wIn.value;
+    wTimer = setTimeout(function(){
+      if (raw.trim() === "") setWeight(k, null);
+      else { var v = parseFloat(raw); if (!isNaN(v) && v > 0) setWeight(k, toKg(v)); }
+    }, 700);
+  });
+  wIn.addEventListener("change", function(){ setTimeout(render, 750); });
+  wbox.appendChild(wIn);
+  wbox.appendChild(el("span","unit", unitLabel()));
+  wrow.appendChild(wbox);
+  root.appendChild(wrow);
+
   /* note */
   var nw = el("div","notewrap");
   var toggle = el("button","notetoggle");
@@ -1014,6 +1191,16 @@ function renderTrend(root){
   card2.appendChild(hitChart(weeks));
   root.appendChild(card2);
 
+  var wks = weightKeys();
+  var card3 = el("div","chartcard");
+  card3.style.marginTop = "14px";
+  card3.appendChild(el("h2","","Weight"));
+  card3.appendChild(el("p","sub", wks.length < 2
+    ? "Log weights on the Today screen and a trend line appears here."
+    : wks.length + " readings in " + unitLabel() + ". Dots are what the scale said, the line is a 7 day average — day to day noise is not the signal."));
+  if (wks.length >= 2) card3.appendChild(weightChart(wks));
+  root.appendChild(card3);
+
   /* The current week is still filling up. Comparing it to a finished week
      would report a slump every Monday, so trends are read off whole weeks
      and this week is reported separately as a partial. */
@@ -1136,6 +1323,69 @@ function hitChart(weeks){
   return svg;
 }
 
+/* Daily weights are noisy; the 7 day trailing mean is what actually moves.
+   Gaps are expected - the line simply spans them. */
+function weightChart(keys){
+  var today = parseKey(todayKey()), cut = new Date(today); cut.setDate(cut.getDate() - 89);
+  var inWin = keys.filter(function(k){ return k >= keyOf(cut); });
+  if (inWin.length < 2) return el("div","");
+  /* Start the axis at the first reading, not a fixed 90 days back, so a short
+     history fills the chart instead of huddling against the right edge. */
+  var first = parseKey(inWin[0]);
+  var span = Math.max(1, Math.round((today - first) / 86400000));
+  var pts = inWin.map(function(k){
+    return { k:k, x:Math.round((parseKey(k) - first) / 86400000), v:fromKg(getWeight(k)) };
+  });
+
+  var avg = pts.map(function(p){
+    var lo = p.x - 6, sum = 0, n = 0;
+    for (var i=0;i<pts.length;i++) if (pts[i].x <= p.x && pts[i].x >= lo){ sum += pts[i].v; n++; }
+    return { x:p.x, v:sum / n };
+  });
+
+  var vals = pts.map(function(p){ return p.v; });
+  var lo = Math.min.apply(null, vals), hi = Math.max.apply(null, vals);
+  var padV = Math.max(0.6, (hi - lo) * 0.18);
+  lo -= padV; hi += padV;
+  if (hi - lo < 1) { hi += 0.5; lo -= 0.5; }
+
+  var W = 640, H = 200, padL = 42, padR = 12, padT = 14, padB = 26;
+  var iW = W - padL - padR, iH = H - padT - padB;
+  var X = function(x){ return padL + (x / span) * iW; };
+  var Y = function(v){ return padT + iH - ((v - lo) / (hi - lo)) * iH; };
+
+  var svg = svgEl("svg", { viewBox:"0 0 "+W+" "+H, "class":"chart", role:"img",
+    "aria-label":"Weight over the last 90 days in " + unitLabel() });
+
+  [hi, (hi+lo)/2, lo].forEach(function(v){
+    svg.appendChild(svgEl("line", { x1:padL, x2:W-padR, y1:Y(v), y2:Y(v), "class":"ax" }));
+    var t = svgEl("text", { x:padL-6, y:Y(v)+3.5, "text-anchor":"end", "class":"ax-label" });
+    t.textContent = v.toFixed(1);
+    svg.appendChild(t);
+  });
+
+  svg.appendChild(svgEl("polyline", {
+    points: avg.map(function(p){ return X(p.x).toFixed(1) + "," + Y(p.v).toFixed(1); }).join(" "),
+    "class":"maline"
+  }));
+  pts.forEach(function(p){
+    svg.appendChild(svgEl("circle", { cx:X(p.x), cy:Y(p.v), r:2.4, "class":"wdot" }));
+  });
+  var last = pts[pts.length-1];
+  svg.appendChild(svgEl("circle", { cx:X(last.x), cy:Y(last.v), r:4, "class":"wdot-last" }));
+  var lt = svgEl("text", { x:Math.min(X(last.x), W-padR-4), y:Math.max(padT+9, Y(last.v)-9),
+    "text-anchor":"end", "class":"bar-label" });
+  lt.textContent = last.v.toFixed(1);
+  svg.appendChild(lt);
+
+  [0, span].forEach(function(x, i){
+    var d = new Date(first); d.setDate(d.getDate() + x);
+    var t = svgEl("text", { x:X(x), y:H-7, "text-anchor": i ? "end" : "start", "class":"x-label" });
+    t.textContent = d.getDate() + "/" + (d.getMonth()+1);
+    svg.appendChild(t);
+  });
+  return svg;
+}
 function svgEl(tag, attrs){
   var n = document.createElementNS("http://www.w3.org/2000/svg", tag);
   for (var k in attrs) n.setAttribute(k, attrs[k]);
@@ -1252,6 +1502,130 @@ function renderSetup(root){
   s4.appendChild(c4);
   root.appendChild(s4);
 
+  /* --- body and calories --- */
+  var pr = state.settings.profile;
+  var sB = el("div","sec");
+  sB.appendChild(el("h2","","Body and calories"));
+  sB.appendChild(el("p","sub","Estimates what you burn in a day using the Mifflin-St Jeor equation, from your most recent weight. These are estimates, not measurements. Treat the number as a starting point and adjust it from what the scale actually does over a few weeks."));
+
+  var cB = el("div","card");
+  cB.appendChild(selectRow("Units", null, "unitsSel",
+    [{v:"lb",t:"Pounds"},{v:"kg",t:"Kilograms"}], state.settings.units,
+    function(v){ state.settings.units = v; persistSettings(); render(); }));
+
+  var rDob = el("div","frow");
+  var lDob = el("label"); lDob.htmlFor = "dobField";
+  lDob.appendChild(document.createTextNode("Date of birth"));
+  var yrs = ageYears(pr.dob);
+  lDob.appendChild(el("small","", yrs === null ? "The equation needs your age" : yrs + " years old"));
+  var iDob = el("input"); iDob.type = "date"; iDob.id = "dobField";
+  iDob.value = pr.dob || "";
+  iDob.addEventListener("change", function(){
+    state.settings.profile.dob = iDob.value || null; persistSettings(); render();
+  });
+  rDob.appendChild(lDob); rDob.appendChild(iDob);
+  cB.appendChild(rDob);
+
+  var rH = el("div","frow");
+  var lH = el("label");
+  lH.appendChild(document.createTextNode("Height"));
+  lH.appendChild(el("small","", pr.heightCm ? Math.round(pr.heightCm) + " cm" : "Needed for the estimate"));
+  rH.appendChild(lH);
+  if (state.settings.units === "kg"){
+    var iCm = el("input"); iCm.type = "number"; iCm.id = "hCm"; iCm.step = "1"; iCm.placeholder = "cm";
+    iCm.value = pr.heightCm ? Math.round(pr.heightCm) : "";
+    iCm.addEventListener("change", function(){
+      var v = parseFloat(iCm.value);
+      state.settings.profile.heightCm = (!isNaN(v) && v > 0) ? v : null;
+      persistSettings(); render();
+    });
+    rH.appendChild(iCm);
+  } else {
+    var totIn = pr.heightCm ? pr.heightCm / 2.54 : null;
+    var ftV = "", inV = "";
+    if (totIn){
+      ftV = Math.floor(totIn / 12);
+      inV = Math.round(totIn - ftV * 12);
+      if (inV === 12){ ftV += 1; inV = 0; }
+    }
+    var hbox = el("div","hbox");
+    var iFt = el("input"); iFt.type = "number"; iFt.id = "hFt"; iFt.placeholder = "ft"; iFt.value = ftV;
+    iFt.setAttribute("aria-label","Height, feet");
+    var iIn = el("input"); iIn.type = "number"; iIn.id = "hIn"; iIn.placeholder = "in"; iIn.value = inV;
+    iIn.setAttribute("aria-label","Height, inches");
+    var setH = function(){
+      var f = parseFloat(iFt.value), n = parseFloat(iIn.value);
+      if (isNaN(f)) f = 0;
+      if (isNaN(n)) n = 0;
+      var cm = (f * 12 + n) * 2.54;
+      state.settings.profile.heightCm = cm > 0 ? cm : null;
+      persistSettings(); render();
+    };
+    iFt.addEventListener("change", setH); iIn.addEventListener("change", setH);
+    hbox.appendChild(iFt); hbox.appendChild(el("span","unit","ft"));
+    hbox.appendChild(iIn); hbox.appendChild(el("span","unit","in"));
+    rH.appendChild(hbox);
+  }
+  cB.appendChild(rH);
+
+  cB.appendChild(selectRow("Sex", "The equation has no neutral form", "sexSel",
+    [{v:"",t:"Not set"},{v:"male",t:"Male"},{v:"female",t:"Female"}], pr.sex || "",
+    function(v){ state.settings.profile.sex = v || null; persistSettings(); render(); }));
+
+  cB.appendChild(selectRow("Exercise", "How hard a normal week is", "actSel",
+    ACTIVITY.map(function(a){ return { v:String(a.v), t:a.label }; }), String(pr.activity),
+    function(v){ state.settings.profile.activity = parseFloat(v); persistSettings(); render(); }));
+
+  cB.appendChild(selectRow("Goal", null, "goalSel",
+    GOALS.map(function(g){ return { v:g.id, t:g.label + (g.delta ? " · " + rateLabel(g.delta) : "") }; }),
+    pr.goal, function(v){ state.settings.profile.goal = v; persistSettings(); render(); }));
+
+  sB.appendChild(cB);
+
+  var e = energy();
+  if (e.missing.length){
+    sB.appendChild(el("div","status","Add " + listJoin(e.missing) +
+      " and the estimate appears here." + (e.kg === null ? " Weight is entered on the Today screen." : "")));
+  } else {
+    var grid = el("div","wk-sum");
+    grid.style.marginTop = "12px";
+    grid.appendChild(cellBox("Weight", fmt1(fromKg(e.kg)), unitLabel() + ", on " + shortDate(e.weighedOn), null));
+    grid.appendChild(cellBox("BMI", e.bmi.toFixed(1), bmiBandLabel(e.bmi), bmiColor(e.bmi)));
+    grid.appendChild(cellBox("Maintain", String(Math.round(e.tdee)), "cal a day", null));
+    sB.appendChild(grid);
+
+    var tp = el("div","targetpanel");
+    tp.appendChild(el("div","k","Suggested daily target"));
+    tp.appendChild(el("div","v", Math.round(e.target) + " cal"));
+    tp.appendChild(el("div","d", e.goal.label.toLowerCase() +
+      ". Resting burn " + Math.round(e.bmr) + ", times " + pr.activity + " for exercise" +
+      (e.goal.delta ? ", " + (e.goal.delta < 0 ? "minus " : "plus ") + Math.abs(e.goal.delta) : "") + "."));
+    sB.appendChild(tp);
+
+    if (e.target < e.bmr){
+      sB.appendChild(el("div","status warn",
+        "That target is below your resting burn of " + Math.round(e.bmr) +
+        ". Worth easing the goal rather than holding this."));
+    }
+
+    var brT = el("div","btnrow");
+    var useBtn = el("button","btn primary wide");
+    useBtn.type = "button";
+    useBtn.textContent = state.settings.dailyTarget === Math.round(e.target)
+      ? "Daily target is set to " + Math.round(e.target)
+      : "Use " + Math.round(e.target) + " as my daily target";
+    useBtn.disabled = state.settings.dailyTarget === Math.round(e.target);
+    useBtn.addEventListener("click", function(){
+      state.settings.dailyTarget = Math.round(e.target);
+      persistSettings(); render();
+      toast("Daily target set — now split it across slots");
+    });
+    brT.appendChild(useBtn);
+    sB.appendChild(brT);
+    sB.appendChild(el("div","status","Then use Split daily target across slots above, so each meal shows its own hint."));
+  }
+  root.appendChild(sB);
+
   /* --- data --- */
   var s5 = el("div","sec");
   s5.appendChild(el("h2","","Backup and sync"));
@@ -1355,8 +1729,40 @@ function renderSetup(root){
   root.appendChild(s5);
 
   var s6 = el("div","sec");
-  s6.appendChild(el("p","sub","Weight tracking is deliberately not built yet. The data model leaves room for it without touching anything you have logged."));
+  s6.appendChild(el("p","sub","Weights are kept separately from meal ratings, so neither can disturb the other. Comparing the two \u2014 how the scale moves against how you ate the day before \u2014 is not built yet."));
   root.appendChild(s6);
+}
+function shortDate(k){ var d = parseKey(k); return d.getDate() + " " + MON[d.getMonth()]; }
+function fmt1(n){ return (Math.round(n * 10) / 10).toFixed(1); }
+function listJoin(a){
+  if (a.length === 1) return a[0];
+  return a.slice(0, -1).join(", ") + " and " + a[a.length - 1];
+}
+function rateLabel(delta){
+  var lbWk = Math.abs(delta) * 7 / 3500;
+  return state.settings.units === "kg" ? fmt1(lbToKg(lbWk) * 10 / 10) + " kg a week"
+                                       : fmt1(lbWk) + " lb a week";
+}
+function bmiColor(v){
+  var b = bmiBand(v);
+  return b === "healthy" ? "var(--r-perfect)" : b === "over" ? "var(--r-bad)"
+       : b === "obese" ? "var(--r-terrible)" : "var(--r-bad)";
+}
+function selectRow(labelText, hint, id, opts, current, onChange){
+  var r = el("div","frow");
+  var l = el("label"); l.htmlFor = id;
+  l.appendChild(document.createTextNode(labelText));
+  if (hint) l.appendChild(el("small","", hint));
+  var sel = el("select"); sel.id = id;
+  opts.forEach(function(o){
+    var op = el("option", null, o.t);
+    op.value = o.v;
+    if (String(o.v) === String(current)) op.selected = true;
+    sel.appendChild(op);
+  });
+  sel.addEventListener("change", function(){ onChange(sel.value); });
+  r.appendChild(l); r.appendChild(sel);
+  return r;
 }
 function numRow(labelText, id, value, hint, onSet){
   var r = el("div","frow");
