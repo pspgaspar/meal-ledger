@@ -283,6 +283,12 @@ svg.chart .wdot-last{fill:var(--accent)}
 svg.chart .maline{fill:none;stroke:var(--accent);stroke-width:2;stroke-linejoin:round;stroke-linecap:round}
 .targetpanel{border:1px solid var(--accent);border-radius:12px;background:var(--surface);
   padding:13px 15px;margin-top:10px}
+.suggest{display:flex;align-items:center;gap:12px;margin-top:10px;
+  border:1px solid var(--accent);border-radius:12px;background:var(--surface);padding:11px 13px}
+.suggest .t{flex:1;min-width:0}
+.suggest .t b{display:block;font-size:13px;font-weight:600}
+.suggest .t small{display:block;color:var(--ink-faint);font-size:11.5px;line-height:1.45;margin-top:1px}
+.suggest .btn{flex:none;padding:8px 12px;font-size:13px}
 .targetpanel .k{font-size:9px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-faint)}
 .targetpanel .v{font-family:var(--font-num);font-size:30px;font-weight:600;line-height:1.15;
   color:var(--accent);font-variant-numeric:tabular-nums}
@@ -343,17 +349,29 @@ var ACTIVITY = [
   { v:1.725, label:"Hard, 6 to 7 days a week" },
   { v:1.9,   label:"Very hard, or a physical job" }
 ];
+/* Ids are kept stable because they are stored in settings; a renamed id would
+   silently reset a saved goal to the first entry. */
 var GOALS = [
-  { id:"maintain", delta:0,    label:"Stay where I am" },
-  { id:"lose250",  delta:-250, label:"Lose slowly" },
-  { id:"lose500",  delta:-500, label:"Lose steadily" },
-  { id:"gain250",  delta:250,  label:"Gain slowly" }
+  { id:"maintain", delta:0,     label:"Stay where I am" },
+  { id:"lose250",  delta:-250,  label:"Lose slowly" },
+  { id:"lose500",  delta:-500,  label:"Lose steadily" },
+  { id:"lose750",  delta:-750,  label:"Lose fast" },
+  { id:"lose1000", delta:-1000, label:"Lose very fast" },
+  { id:"lose1500", delta:-1500, label:"Aggressive" },
+  { id:"gain250",  delta:250,   label:"Gain slowly" }
 ];
+/* Roughly 3500 kcal per pound, 7700 per kilo. */
+function kcalPerUnit(){ return state.settings.units === "kg" ? 7700 : 3500; }
+/* The most that can plausibly come off as fat: about 1% of bodyweight a week. */
+function maxFatRate(kg){
+  if (!kg) return null;
+  return fromKg(kg) * 0.01;
+}
 
 var DEFAULT_SETTINGS = {
   dailyTarget: null,
   units: "lb",
-  profile: { dob:null, heightCm:null, sex:null, activity:1.725, goal:"maintain", activityMode:"typical" },
+  profile: { dob:null, heightCm:null, sex:null, activity:1.725, goal:"maintain", activityMode:"typical", assumedActive:500 },
   extraPenalty: 1,
   extraCap: 3,
   weekStartsOn: 1,
@@ -546,6 +564,21 @@ function activeWindow(n){
   return { mean: sum / n, total: sum, logged: logged, days: n };
 }
 
+/* Targets should not move every day, or the per-meal hints become noise. A
+   fixed assumed figure drives the numbers and last week's reality is offered as
+   a correction rather than applied behind the user's back. Needs 4 of 7 days
+   logged before the average is worth listening to. */
+function activitySuggestion(){
+  var pr = state.settings.profile;
+  if ((pr.activityMode || "typical") !== "estimate") return null;
+  var w = activeWindow(7);
+  if (w.logged < 4) return null;
+  var actual = Math.round(w.mean / 10) * 10;
+  var assumed = Number(pr.assumedActive) || 0;
+  if (Math.abs(actual - assumed) < 100) return null;
+  return { actual: actual, assumed: assumed, logged: w.logged };
+}
+
 /* Age in whole years, recomputed from the date of birth so it never goes stale. */
 function ageYears(dob){
   if (!dob) return null;
@@ -582,15 +615,24 @@ function energy(){
   var win = activeWindow(14);
   /* "logged" needs a few real days behind it, or one gym session would set
      the target for a fortnight. Below that it quietly falls back. */
-  var useLogged = (pr.activityMode === "logged" && win.logged >= 3);
-  var basis = useLogged ? "logged" : (pr.activityMode === "logged" ? "fallback" : "typical");
+  var mode = pr.activityMode || "typical";
+  var assumed = Number(pr.assumedActive);
+  if (!isFinite(assumed) || assumed < 0) assumed = 0;
+  var useLogged = (mode === "logged" && win.logged >= 3);
+  var basis = useLogged ? "logged" : (mode === "logged" ? "fallback" : mode);
   var tdee = null;
-  if (b !== null) tdee = useLogged ? (b * 1.2 + win.mean) : (b * act);
+  if (b !== null){
+    if (useLogged) tdee = b * 1.2 + win.mean;
+    else if (mode === "typical") tdee = b * act;
+    else tdee = b * 1.2 + assumed;        /* "estimate", and the logged fallback */
+  }
   var g = goalById(pr.goal);
-  var target = tdee === null ? null : tdee + g.delta;
+  var gd = g.delta;
+  var target = tdee === null ? null : tdee + gd;
   return {
     kg: kg, weighedOn: lw ? lw.key : null, age: age, cm: pr.heightCm, sex: pr.sex,
-    bmr: b, tdee: tdee, goal: g, target: target, basis: basis, win: win, act: act,
+    bmr: b, tdee: tdee, goal: g, gd: gd, target: target, basis: basis, win: win,
+    act: act, assumed: assumed,
     bmi: bmiOf(kg, pr.heightCm),
     missing: [
       kg === null ? "a weight" : null,
@@ -1676,16 +1718,22 @@ function renderSetup(root){
     [{v:"",t:"Not set"},{v:"male",t:"Male"},{v:"female",t:"Female"}], pr.sex || "",
     function(v){ state.settings.profile.sex = v || null; persistSettings(); render(); }));
 
-  cB.appendChild(selectRow("Exercise", "Exercise varies day to day; pick how to account for it", "basisSel",
-    [{v:"typical",t:"Assume a typical week"},{v:"logged",t:"Use what I log each day"}],
-    pr.activityMode || "typical",
+  var mode = pr.activityMode || "typical";
+  cB.appendChild(selectRow("Exercise", "Exercise varies daily; your target should not", "basisSel",
+    [{v:"estimate",t:"A daily average I set"},
+     {v:"typical", t:"Assume a typical week"},
+     {v:"logged",  t:"Whatever I logged"}],
+    mode,
     function(v){ state.settings.profile.activityMode = v; persistSettings(); render(); }));
 
-  if ((pr.activityMode || "typical") === "typical"){
+  if (mode === "typical"){
     cB.appendChild(selectRow("Typical week", "One multiplier for every day", "actSel",
       ACTIVITY.map(function(a){ return { v:String(a.v), t:a.label + "  \u00b7  " + a.v }; }),
       String(pr.activity),
       function(v){ state.settings.profile.activity = parseFloat(v); persistSettings(); render(); }));
+  } else if (mode === "estimate"){
+    cB.appendChild(numRow("Active calories a day", "assumedField", pr.assumedActive,
+      "A steady figure to budget against", function(v){ state.settings.profile.assumedActive = v; }));
   } else {
     var xw = activeWindow(14);
     var rX = el("div","frow");
@@ -1693,7 +1741,7 @@ function renderSetup(root){
     lX.appendChild(document.createTextNode("Logged so far"));
     lX.appendChild(el("small","", xw.logged >= 3
       ? xw.logged + " of the last 14 days, averaging " + Math.round(xw.mean) + " cal a day. Unlogged days count as zero."
-      : xw.logged + " of the last 14 days. Three are needed before this replaces the typical week."));
+      : xw.logged + " of the last 14 days. Three are needed, so your assumed figure is used until then."));
     rX.appendChild(lX);
     cB.appendChild(rX);
   }
@@ -1703,6 +1751,26 @@ function renderSetup(root){
     pr.goal, function(v){ state.settings.profile.goal = v; persistSettings(); render(); }));
 
   sB.appendChild(cB);
+
+  var sug = activitySuggestion();
+  if (sug){
+    var sg = el("div","suggest");
+    var sgt = el("div","t");
+    sgt.appendChild(el("b","","Last 7 days averaged " + sug.actual + " cal a day"));
+    sgt.appendChild(el("small","","You are budgeting for " + sug.assumed +
+      ". Switching moves your target by " + signed(sug.actual - sug.assumed) + " cal a day."));
+    sg.appendChild(sgt);
+    var sgb = el("button","btn primary");
+    sgb.type = "button";
+    sgb.textContent = "Use " + sug.actual;
+    sgb.addEventListener("click", function(){
+      state.settings.profile.assumedActive = sug.actual;
+      persistSettings(); render();
+      toast("Now budgeting for " + sug.actual + " cal a day");
+    });
+    sg.appendChild(sgb);
+    sB.appendChild(sg);
+  }
 
   var e = energy();
   if (e.missing.length){
@@ -1724,18 +1792,28 @@ function renderSetup(root){
     tp.appendChild(el("div","v", Math.round(e.target) + " cal"));
     var how;
     if (e.basis === "logged"){
-      how = "Resting burn " + Math.round(e.bmr) + " × 1.2 for ordinary living, plus " +
-            Math.round(e.win.mean) + " cal a day of logged exercise";
-    } else {
+      how = "Resting burn " + Math.round(e.bmr) + " × 1.2 for ordinary living, plus the " +
+            Math.round(e.win.mean) + " cal a day you actually logged";
+    } else if (e.basis === "typical"){
       how = "Resting burn " + Math.round(e.bmr) + " × " + e.act + " for a typical week";
+    } else {
+      how = "Resting burn " + Math.round(e.bmr) + " × 1.2 for ordinary living, plus " +
+            Math.round(e.assumed) + " cal a day of exercise";
     }
     tp.appendChild(el("div","d", e.goal.label.toLowerCase() + ". " + how +
       (e.goal.delta ? ", " + (e.goal.delta < 0 ? "minus " : "plus ") + Math.abs(e.goal.delta) : "") + "."));
     if (e.basis === "fallback"){
-      tp.appendChild(el("div","d","Set to use logged exercise, but fewer than three of the last 14 days have any. Using the typical week until then."));
+      tp.appendChild(el("div","d","Set to use logged exercise, but fewer than three of the last 14 days have any. Using your assumed " + Math.round(e.assumed) + " a day until then."));
     }
     sB.appendChild(tp);
 
+    var mfr = maxFatRate(e.kg);
+    var rate = Math.abs(e.gd) * 7 / (state.settings.units === "kg" ? 7700 : 3500);
+    if (e.gd < 0 && mfr && rate > mfr + 0.05){
+      sB.appendChild(el("div","status",
+        "At " + fmt1(fromKg(e.kg)) + " " + unitLabel() + ", about " + fmt1(mfr) + " " + unitLabel() +
+        " a week is the most that can come off as fat. Past that the extra is lean tissue and water, and it comes back."));
+    }
     if (e.target < e.bmr){
       sB.appendChild(el("div","status warn",
         "That target is below your resting burn of " + Math.round(e.bmr) +
