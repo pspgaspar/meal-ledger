@@ -286,6 +286,11 @@ svg.chart .maline{fill:none;stroke:var(--accent);stroke-width:2;stroke-linejoin:
 .targetpanel .k{font-size:9px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-faint)}
 .targetpanel .v{font-family:var(--font-num);font-size:30px;font-weight:600;line-height:1.15;
   color:var(--accent);font-variant-numeric:tabular-nums}
+.rorow{display:block;padding:10px 12px;border-top:1px solid var(--rule-soft)}
+.rorow:first-child{border-top:none}
+.rorow label{display:block;font-size:10px;font-weight:700;color:var(--ink-faint);
+  margin-bottom:4px;text-transform:uppercase;letter-spacing:.09em}
+.rorow input{width:100%;font-family:var(--font-num);font-size:12.5px;text-align:left}
 .targetpanel .d{font-size:11.5px;color:var(--ink-faint);line-height:1.45;margin-top:3px}
 
 /* ---------- sync chip ---------- */
@@ -375,7 +380,7 @@ var DOW = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
 var MON = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 
 /* ============================ state ============================ */
-var state = { settings: clone(DEFAULT_SETTINGS), settingsUpdatedAt: null, days: {}, weights: {}, exercise: {} };
+var state = { settings: clone(DEFAULT_SETTINGS), settingsUpdatedAt: null, days: {}, weights: {}, exercise: {}, exSeen: {} };
 var ui    = { view:"today", date:todayKey(), noteOpen:false };
 var pendingRender = false;
 
@@ -601,6 +606,7 @@ function energy(){
    Every change writes locally first so a tap is never blocked on the network,
    then a debounced push mirrors it to the Gist. */
 var GIST_FILE = "meal-ledger.json";
+var INBOX_FILE = "exercise-inbox.json";
 var GIST_DESC = "Meal Ledger - diet tracking data";
 var TOKEN_KEY = "mealledger.token.v1";
 var GIST_KEY  = "mealledger.gistid.v1";
@@ -616,7 +622,8 @@ function saveCache(){
     settingsUpdatedAt: state.settingsUpdatedAt || null,
     days: state.days,
     weights: state.weights,
-    exercise: state.exercise
+    exercise: state.exercise,
+    exSeen: state.exSeen
   }));
 }
 function saveUi(){ lsSet(UI_KEY, JSON.stringify(ui)); }
@@ -631,6 +638,7 @@ function loadCache(){
       if (c && c.days) state.days = c.days;
       if (c && c.weights) state.weights = c.weights;
       if (c && c.exercise) state.exercise = c.exercise;
+      if (c && c.exSeen) state.exSeen = c.exSeen;
     } catch(e){}
   }
   var u = lsGet(UI_KEY);
@@ -712,7 +720,8 @@ function payload(){
     settings: state.settings,
     days: state.days,
     weights: state.weights,
-    exercise: state.exercise
+    exercise: state.exercise,
+    exSeen: state.exSeen
   };
 }
 function gistFiles(){
@@ -759,6 +768,10 @@ function mergeRemote(remote){
       }
     }
   }
+  if (remote && remote.exSeen){
+    for (k in remote.exSeen)
+      if (state.exSeen[k] === undefined) state.exSeen[k] = remote.exSeen[k];
+  }
   if (remote && remote.settings){
     var rs = remote.settingsUpdatedAt || null, ls = state.settingsUpdatedAt || null;
     if (!ls || (rs && rs > ls)){
@@ -768,6 +781,30 @@ function mergeRemote(remote){
     }
   }
   if (changed){ saveCache(); renderSafe(); }
+  return changed;
+}
+
+/* A separate file in the same Gist, written by an Apple Shortcut. It is kept
+   apart from meal-ledger.json on purpose: an outside writer must never be able
+   to touch the ratings, only add to this inbox.
+   Accepts {"2026-09-29": 620} or {"exercise": {"2026-09-29": 620}}. */
+function mergeInbox(raw){
+  var data;
+  try { data = JSON.parse(raw); } catch(e){ return false; }
+  if (!data || typeof data !== "object") return false;
+  var entries = (data.exercise && typeof data.exercise === "object") ? data.exercise : data;
+  var changed = false;
+  for (var k in entries){
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(k)) continue;
+    var v = Number(entries[k]);
+    if (!isFinite(v) || v < 0 || v > 20000) continue;
+    /* Applying the same figure twice would undo a correction typed by hand,
+       so only act when the Shortcut reports something new. */
+    if (state.exSeen[k] === v) continue;
+    state.exSeen[k] = v;
+    state.exercise[k] = { kcal: v, updatedAt: new Date().toISOString() };
+    changed = true;
+  }
   return changed;
 }
 
@@ -807,6 +844,8 @@ function pullNow(){
     .then(function(id){ return gh("/gists/" + id); })
     .then(function(g){
       var f = g.files && g.files[GIST_FILE], out = false;
+      var inbox = g.files && g.files[INBOX_FILE];
+      if (inbox && inbox.content && mergeInbox(inbox.content)){ out = true; saveCache(); }
       if (f && f.content){
         var parsed;
         try { parsed = JSON.parse(f.content); }
@@ -1823,9 +1862,34 @@ function renderSetup(root){
   s5.appendChild(br5);
   root.appendChild(s5);
 
+  /* --- Apple Health via Shortcuts --- */
+  if (connected && sync.gistId){
+    var sA = el("div","sec");
+    sA.appendChild(el("h2","","Exercise from Apple Health"));
+    sA.appendChild(el("p","sub","A web page cannot read Apple Health \u2014 that is a limit of iOS, not of this app. An Apple Shortcut can read it and can write here, so a nightly automation can fill Exercise in for you. Point one at this Gist."));
+    var cA = el("div","card");
+    cA.appendChild(roRow("Gist ID", "gistIdField", sync.gistId));
+    cA.appendChild(roRow("File for the Shortcut to write", "inboxField", INBOX_FILE));
+    cA.appendChild(roRow("Body it should send", "inboxShape",
+      '{"files":{"' + INBOX_FILE + '":{"content":"{\\"' + todayKey() + '\\":620}"}}}'));
+    sA.appendChild(cA);
+    sA.appendChild(el("div","status","Tap a field to select it. The app reads that file whenever it opens and folds anything new into Exercise. A figure you typed by hand is left alone unless the Shortcut reports a different one, so correcting a bad reading sticks."));
+    root.appendChild(sA);
+  }
+
   var s6 = el("div","sec");
   s6.appendChild(el("p","sub","Weights are kept separately from meal ratings, so neither can disturb the other. Comparing the two \u2014 how the scale moves against how you ate the day before \u2014 is not built yet."));
   root.appendChild(s6);
+}
+function roRow(labelText, id, value){
+  var r = el("div","rorow");
+  var l = el("label"); l.htmlFor = id; l.textContent = labelText;
+  var i = el("input"); i.type = "text"; i.id = id; i.value = value;
+  i.readOnly = true; i.spellcheck = false;
+  i.addEventListener("focus", function(){ i.select(); });
+  i.addEventListener("click", function(){ i.select(); });
+  r.appendChild(l); r.appendChild(i);
+  return r;
 }
 function shortDate(k){ var d = parseKey(k); return d.getDate() + " " + MON[d.getMonth()]; }
 function fmt1(n){ return (Math.round(n * 10) / 10).toFixed(1); }

@@ -63,3 +63,49 @@ To check the JavaScript parses before pushing:
 sed -n '/^<script>/,/^<\/script>/p' index.html | sed '1d;$d' > /tmp/ml.js
 node --check /tmp/ml.js
 ```
+
+## Automatic exercise from Apple Health
+
+A web page cannot read Apple Health. HealthKit is native-only and has no browser
+API, so this is a limit of iOS rather than of the app. Apple Shortcuts *can*
+read it and can make an HTTP request, so a nightly automation fills in Exercise
+with no backend and no App Store.
+
+The Shortcut writes to `exercise-inbox.json`, a **separate file** in the same
+Gist. It never touches `meal-ledger.json`, so an outside writer can add to the
+exercise log and cannot damage ratings, weights or settings. Verified: adding a
+file to a Gist leaves the other files byte-identical.
+
+The app reads the inbox on every open and folds new figures into Exercise. A
+value already applied is skipped, so a correction typed by hand survives the
+automation running again; only a genuinely different reading overrides it.
+
+### Setting it up
+
+1. Create a second GitHub token with only the `gist` scope.
+2. Shortcuts app, Automation tab, new Personal Automation, Time of Day, around
+   23:45, Run Immediately.
+3. Actions:
+   - **Find Health Samples** — type Active Energy, filtered to today.
+   - **Calculate Statistics** — Sum.
+   - **Round Number** — to a whole number.
+   - **Text**, containing exactly:
+
+     ```
+     {"files":{"exercise-inbox.json":{"content":"{\"DATE\":NUMBER}"}}}
+     ```
+
+     Replace `DATE` with a Current Date variable formatted `yyyy-MM-dd`, and
+     `NUMBER` with the rounded sum. The backslashes are literal: the inner
+     object is a JSON *string*, which is how the Gist API takes file content.
+   - **Get Contents of URL**
+     - URL `https://api.github.com/gists/<your gist id>`
+     - Method `PATCH`
+     - Headers: `Authorization: Bearer <token>`, `Accept: application/vnd.github+json`
+     - Request Body: Text, set to the Text action above.
+
+The Gist ID and the exact body shape are shown in the app under Setup, in
+"Exercise from Apple Health", so they can be copied on the phone.
+
+Action names vary a little between iOS versions, and this recipe has not been
+run on a device.
