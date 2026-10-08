@@ -279,10 +279,21 @@ a.btn{text-decoration:none;color:inherit}
 .hbox input{width:62px}
 .unit{font-size:12px;color:var(--ink-faint);font-family:var(--font-num)}
 svg.chart .wdot{fill:var(--ink-faint)}
+svg.chart .xbar{fill:var(--r-good)}
+svg.chart .xbar-rest{fill:var(--empty)}
 svg.chart .wdot-last{fill:var(--accent)}
 svg.chart .maline{fill:none;stroke:var(--accent);stroke-width:2;stroke-linejoin:round;stroke-linecap:round}
 .targetpanel{border:1px solid var(--accent);border-radius:12px;background:var(--surface);
   padding:13px 15px;margin-top:10px}
+.statcard{display:flex;align-items:center;gap:12px;margin-top:14px;
+  border:1px solid var(--rule);border-radius:12px;background:var(--surface);padding:11px 13px}
+.statcard .t{flex:1;min-width:0}
+.statcard .t b{display:block;font-size:13px;font-weight:600}
+.statcard .t small{display:block;color:var(--ink-faint);font-size:11.5px;line-height:1.45;margin-top:1px}
+.statcard .v{flex:none;text-align:right;font-family:var(--font-num);font-size:20px;
+  font-weight:600;font-variant-numeric:tabular-nums;line-height:1.15}
+.statcard .v em{display:block;font-style:normal;font-size:10px;font-weight:600;
+  letter-spacing:.08em;text-transform:uppercase;color:var(--ink-faint);font-family:var(--font-ui)}
 .splitrow{display:flex;align-items:center;gap:12px;padding:10px 12px;
   border-top:1px solid var(--rule-soft)}
 .splitrow:first-child{border-top:none}
@@ -581,6 +592,14 @@ function setEx(k, kcal){
 }
 function exKeys(){
   return Object.keys(state.exercise).filter(function(k){ return getEx(k) !== null; }).sort();
+}
+function exerciseOver(keys){
+  var sum = 0, logged = 0;
+  for (var i=0;i<keys.length;i++){
+    var v = getEx(keys[i]);
+    if (v !== null){ sum += v; logged++; }
+  }
+  return { total:sum, logged:logged, days:keys.length, mean: keys.length ? sum / keys.length : 0 };
 }
 /* Mean active calories per CALENDAR day over the window. A day with nothing
    logged counts as zero, not as missing: averaging only over logged days would
@@ -1212,9 +1231,9 @@ function renderToday(root){
   var xrow = el("div","extras");
   var xt = el("div","t");
   xt.appendChild(el("b","","Exercise"));
-  var curEx = getEx(k), xwin = activeWindow(14);
-  xt.appendChild(el("small","", xwin.logged >= 3
-    ? "Averaging " + Math.round(xwin.mean) + " cal a day over 14 days"
+  var curEx = getEx(k), xwin = activeWindow(7);
+  xt.appendChild(el("small","", xwin.logged >= 2
+    ? "Last 7 days: " + Math.round(xwin.mean) + " cal a day, " + xwin.logged + " logged"
     : "Active calories. Your watch's move number, or a guess."));
   xrow.appendChild(xt);
   var xbox = el("div","wbox");
@@ -1346,6 +1365,27 @@ function renderWeek(root){
   s2.appendChild(i2); s2.appendChild(document.createTextNode("Not logged"));
   lg.appendChild(s2);
   root.appendChild(lg);
+
+  /* Days that have not happened yet are not zeroes. Averaging the current week
+     over all 7 would understate it every Monday. */
+  var elapsed = st.keys.filter(function(k){ return k <= todayKey(); });
+  var sofar = elapsed.length ? elapsed : st.keys;
+  var partial = sofar.length < st.keys.length;
+  var xw = exerciseOver(sofar);
+  var xc = el("div","statcard");
+  var xt = el("div","t");
+  xt.appendChild(el("b","", partial ? "Exercise so far this week" : "Exercise this week"));
+  xt.appendChild(el("small","", xw.logged === 0
+    ? "Nothing logged. Enter active calories on the Today screen."
+    : xw.logged + " of " + sofar.length + " day" + (sofar.length === 1 ? "" : "s") + " logged" +
+      (xw.logged < sofar.length ? ", unlogged days counted as zero" : "") +
+      " \u00b7 " + xw.total + " cal in total"));
+  xc.appendChild(xt);
+  var xv = el("div","v");
+  xv.appendChild(document.createTextNode(xw.logged === 0 ? "\u2013" : String(Math.round(xw.mean))));
+  xv.appendChild(el("em","","cal a day"));
+  xc.appendChild(xv);
+  root.appendChild(xc);
 }
 function cellBox(k, v, d, color){
   var c = el("div","wk-cell");
@@ -1392,6 +1432,18 @@ function renderTrend(root){
     : wks.length + " readings in " + unitLabel() + ". Dots are what the scale said, the line is a 7 day average — day to day noise is not the signal."));
   if (wks.length >= 2) card3.appendChild(weightChart(wks));
   root.appendChild(card3);
+
+  var xw30 = activeWindow(30), xw7 = activeWindow(7);
+  var xch = exerciseChart();
+  var card4 = el("div","chartcard");
+  card4.style.marginTop = "14px";
+  card4.appendChild(el("h2","","Exercise"));
+  card4.appendChild(el("p","sub", xch
+    ? "Active calories a day over 30 days. The line is a 7 day average, now at " +
+      Math.round(xw7.mean) + " a day."
+    : "Log active calories on the Today screen and they appear here."));
+  if (xch) card4.appendChild(xch);
+  root.appendChild(card4);
 
   /* The current week is still filling up. Comparing it to a finished week
      would report a slump every Monday, so trends are read off whole weeks
@@ -1511,6 +1563,69 @@ function hitChart(weeks){
       x.textContent = d.getDate()+"/"+(d.getMonth()+1);
       svg.appendChild(x);
     }
+  });
+  return svg;
+}
+
+/* Active calories per day, with the 7 day trailing mean over the top. Unlogged
+   days are genuinely absent; a logged zero is a rest day and gets a flat mark. */
+function exerciseChart(){
+  var today = parseKey(todayKey()), first = new Date(today);
+  first.setDate(first.getDate() - 29);
+  var days = [], any = false, max = 0;
+  for (var i = 0; i < 30; i++){
+    var d = new Date(first); d.setDate(d.getDate() + i);
+    var v = getEx(keyOf(d));
+    if (v !== null){ any = true; if (v > max) max = v; }
+    days.push({ x:i, v:v });
+  }
+  if (!any) return null;
+  max = Math.max(100, Math.ceil(max / 100) * 100);
+
+  var mean = days.map(function(d, i){
+    var sum = 0, n = 0;
+    for (var j = Math.max(0, i - 6); j <= i; j++){ sum += (days[j].v || 0); n++; }
+    return { x:d.x, v: sum / n };
+  });
+
+  var W = 640, H = 180, padL = 42, padR = 12, padT = 14, padB = 26;
+  var iW = W - padL - padR, iH = H - padT - padB;
+  var X = function(x){ return padL + (x / 29) * iW; };
+  var Y = function(v){ return padT + iH - (v / max) * iH; };
+  var bw = Math.min(14, (iW / 30) * 0.62);
+
+  var svg = svgEl("svg", { viewBox:"0 0 "+W+" "+H, "class":"chart", role:"img",
+    "aria-label":"Active calories a day over the last 30 days" });
+
+  [max, max/2, 0].forEach(function(v){
+    svg.appendChild(svgEl("line", { x1:padL, x2:W-padR, y1:Y(v), y2:Y(v), "class":"ax" }));
+    var t = svgEl("text", { x:padL-6, y:Y(v)+3.5, "text-anchor":"end", "class":"ax-label" });
+    t.textContent = String(Math.round(v));
+    svg.appendChild(t);
+  });
+
+  days.forEach(function(d){
+    if (d.v === null) return;
+    if (d.v === 0){
+      svg.appendChild(svgEl("rect", { x:X(d.x)-bw/2, y:Y(0)-2, width:bw, height:2,
+        rx:1, "class":"xbar-rest" }));
+      return;
+    }
+    var h = Math.max(2, (d.v / max) * iH);
+    svg.appendChild(svgEl("rect", { x:X(d.x)-bw/2, y:Y(d.v), width:bw, height:h,
+      rx:2, "class":"xbar" }));
+  });
+
+  svg.appendChild(svgEl("polyline", {
+    points: mean.map(function(m){ return X(m.x).toFixed(1) + "," + Y(m.v).toFixed(1); }).join(" "),
+    "class":"maline"
+  }));
+
+  [0, 29].forEach(function(x, i){
+    var d = new Date(first); d.setDate(d.getDate() + x);
+    var t = svgEl("text", { x:X(x), y:H-7, "text-anchor": i ? "end" : "start", "class":"x-label" });
+    t.textContent = d.getDate() + "/" + (d.getMonth()+1);
+    svg.appendChild(t);
   });
   return svg;
 }
