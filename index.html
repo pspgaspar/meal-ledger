@@ -321,6 +321,15 @@ svg.chart .maline{fill:none;stroke:var(--accent);stroke-width:2;stroke-linejoin:
 .rorow label{display:block;font-size:10px;font-weight:700;color:var(--ink-faint);
   margin-bottom:4px;text-transform:uppercase;letter-spacing:.09em}
 .rorow input{width:100%;font-family:var(--font-num);font-size:12.5px;text-align:left}
+.calc{margin-top:11px;padding-top:9px;border-top:1px solid var(--rule-soft)}
+.calcrow{display:flex;justify-content:space-between;align-items:baseline;gap:12px;
+  font-size:12px;padding:3px 0;color:var(--ink-soft)}
+.calcrow .n{min-width:0}
+.calcrow .amt{flex:none;font-family:var(--font-num);font-variant-numeric:tabular-nums;
+  font-size:12.5px;font-weight:500;line-height:1.4;color:var(--ink)}
+.calcrow.rule{border-top:1px solid var(--rule);margin-top:5px;padding-top:7px}
+.calcrow.strong,.calcrow.strong .amt{color:var(--ink);font-weight:600}
+.calcrow.strong .amt{font-size:14px}
 .targetpanel .d{font-size:11.5px;color:var(--ink-faint);line-height:1.45;margin-top:3px}
 
 /* ---------- sync chip ---------- */
@@ -1939,7 +1948,7 @@ function renderSetup(root){
     if (pl.holding){
       tp.appendChild(el("div","k","Daily target"));
       tp.appendChild(el("div","v", Math.round(pl.target) + " cal"));
-      tp.appendChild(el("div","d","No goal weight set, so this holds you where you are. " + howText(e) + "."));
+      tp.appendChild(el("div","d","No goal weight set, so this holds you where you are."));
     } else {
       tp.appendChild(el("div","k","To reach " + fmt1(fromKg(pl.goalKg)) + " " + unitLabel() +
         " in " + pl.weeks + " week" + (pl.weeks === 1 ? "" : "s")));
@@ -1947,9 +1956,9 @@ function renderSetup(root){
       tp.appendChild(el("div","d",
         fmt1(Math.abs(pl.toLose)) + " " + unitLabel() + " to " + (pl.toLose >= 0 ? "lose" : "gain") +
         ", so " + fmt1(Math.abs(pl.perWeek)) + " " + unitLabel() + " a week, arriving " +
-        pl.by.getDate() + " " + MON[pl.by.getMonth()] + ". " + howText(e) + ", " +
-        (pl.dailyDelta < 0 ? "minus " : "plus ") + Math.abs(Math.round(pl.dailyDelta)) + "."));
+        pl.by.getDate() + " " + MON[pl.by.getMonth()] + "."));
     }
+    tp.appendChild(calcBreakdown(e, pl));
     if (e.basis === "fallback"){
       tp.appendChild(el("div","d","Set to use logged exercise, but fewer than three of the last 14 days have any. Using your assumed " + Math.round(e.assumed) + " a day until then."));
     }
@@ -2127,20 +2136,38 @@ function roRow(labelText, id, value){
   r.appendChild(l); r.appendChild(i);
   return r;
 }
+/* Every figure traceable. Asked twice where a number came from, which means
+   a prose sentence was the wrong shape for this. */
+function calcBreakdown(e, pl){
+  var box = el("div","calc");
+  function row(name, val, cls){
+    var r = el("div","calcrow" + (cls ? " " + cls : ""));
+    r.appendChild(el("div","n", name));
+    r.appendChild(el("div","amt", val));
+    box.appendChild(r);
+  }
+  row("Resting burn", String(Math.round(e.bmr)));
+  if (e.basis === "typical"){
+    row("Typical week", "\u00d7" + e.act);
+  } else {
+    row("Ordinary living, +20%", "+" + Math.round(e.bmr * 0.2));
+    var ex = (e.basis === "logged") ? e.win.mean : e.assumed;
+    row(e.basis === "logged" ? "Exercise you logged" : "Exercise you assume",
+        "+" + Math.round(ex));
+  }
+  row("Maintain", String(Math.round(e.tdee)), "rule");
+  if (!pl.holding){
+    row(fmt1(Math.abs(pl.perWeek)) + " " + unitLabel() + " a week",
+        (pl.dailyDelta < 0 ? "\u2212" : "+") + Math.abs(Math.round(pl.dailyDelta)));
+  }
+  row("Daily target", String(Math.round(pl.target)), "rule strong");
+  return box;
+}
 function heightLabel(cm){
   if (state.settings.units === "kg") return Math.round(cm) + " cm";
   var ft = Math.floor(cm / 2.54 / 12), inch = Math.round(cm / 2.54 - ft * 12);
   if (inch === 12){ ft++; inch = 0; }
   return ft + " ft " + inch + " in";
-}
-function howText(e){
-  if (e.basis === "logged")
-    return "Resting burn " + Math.round(e.bmr) + " plus 20% for ordinary living, plus the " +
-           Math.round(e.win.mean) + " cal a day you logged";
-  if (e.basis === "typical")
-    return "Resting burn " + Math.round(e.bmr) + " multiplied by " + e.act + " for a typical week";
-  return "Resting burn " + Math.round(e.bmr) + " plus 20% for ordinary living, plus " +
-         Math.round(e.assumed) + " cal a day of exercise";
 }
 
 /* Rescale the shares to total exactly 100, keeping their proportions. The
