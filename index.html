@@ -375,6 +375,16 @@ var CACHE_KEY = "mealledger.cache.v1";
 var UI_KEY    = "mealledger.ui.v1";
 var DAY_MS    = 86400000;
 
+/* Everything above resting that is not deliberate exercise: moving about, and
+   digesting food. Digestion alone is roughly 10% of intake, so this has a floor
+   and cannot sensibly go to zero. A watch's Active Energy already counts
+   incidental movement, so the lower end suits anyone logging watch data. */
+var LIVING = [
+  { v:10, label:"Desk all day, barely move" },
+  { v:15, label:"Desk job, a little walking" },
+  { v:20, label:"Standard sedentary" },
+  { v:30, label:"On my feet a fair bit" }
+];
 var ACTIVITY = [
   { v:1.2,   label:"Barely any exercise" },
   { v:1.375, label:"Light, 1 to 3 days a week" },
@@ -422,7 +432,7 @@ function maxFatRate(kg){
 var DEFAULT_SETTINGS = {
   dailyTarget: null,
   units: "lb",
-  profile: { dob:null, heightCm:null, sex:null, activity:1.725, activityMode:"estimate", assumedActive:500, goalWeightKg:null, goalWeeks:12 },
+  profile: { dob:null, heightCm:null, sex:null, activity:1.725, activityMode:"estimate", assumedActive:500, livingPct:20, goalWeightKg:null, goalWeeks:12 },
   extraPenalty: 1,
   extraCap: 3,
   weekStartsOn: 1,
@@ -686,17 +696,19 @@ function energy(){
   var mode = pr.activityMode || "typical";
   var assumed = Number(pr.assumedActive);
   if (!isFinite(assumed) || assumed < 0) assumed = 0;
+  var living = Number(pr.livingPct);
+  if (!isFinite(living) || living < 0) living = 20;
   var useLogged = (mode === "logged" && win.logged >= 3);
   var basis = useLogged ? "logged" : (mode === "logged" ? "fallback" : mode);
   var tdee = null;
   if (b !== null){
-    if (useLogged) tdee = b * 1.2 + win.mean;
+    if (useLogged) tdee = b * (1 + living / 100) + win.mean;
     else if (mode === "typical") tdee = b * act;
-    else tdee = b * 1.2 + assumed;        /* "estimate", and the logged fallback */
+    else tdee = b * (1 + living / 100) + assumed;   /* estimate, and the logged fallback */
   }
   return {
     kg: kg, weighedOn: lw ? lw.key : null, age: age, cm: pr.heightCm, sex: pr.sex,
-    bmr: b, tdee: tdee, basis: basis, win: win, act: act, assumed: assumed,
+    bmr: b, tdee: tdee, basis: basis, win: win, act: act, assumed: assumed, living: living,
     bmi: bmiOf(kg, pr.heightCm),
     missing: [
       kg === null ? "a weight" : null,
@@ -1865,6 +1877,14 @@ function renderSetup(root){
     mode,
     function(v){ state.settings.profile.activityMode = v; persistSettings(); render(); }));
 
+  if (mode !== "typical"){
+    cB.appendChild(selectRow("Ordinary living",
+      "Moving about and digesting food, on top of resting burn", "livingSel",
+      LIVING.map(function(l){ return { v:String(l.v), t:l.label + "  +" + l.v + "%" }; }),
+      String(pr.livingPct === undefined ? 20 : pr.livingPct),
+      function(v){ state.settings.profile.livingPct = parseFloat(v); persistSettings(); render(); }));
+  }
+
   if (mode === "typical"){
     cB.appendChild(selectRow("Typical week",
       "Multiplies your resting burn. Not a calorie figure.", "actSel",
@@ -2150,7 +2170,7 @@ function calcBreakdown(e, pl){
   if (e.basis === "typical"){
     row("Typical week", "\u00d7" + e.act);
   } else {
-    row("Ordinary living, +20%", "+" + Math.round(e.bmr * 0.2));
+    row("Ordinary living, +" + e.living + "%", "+" + Math.round(e.bmr * e.living / 100));
     var ex = (e.basis === "logged") ? e.win.mean : e.assumed;
     row(e.basis === "logged" ? "Exercise you logged" : "Exercise you assume",
         "+" + Math.round(ex));
